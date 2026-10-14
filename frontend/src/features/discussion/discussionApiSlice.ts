@@ -283,6 +283,43 @@ export const discussionApi = api.injectEndpoints({
         }
       },
     }),
+    updateQuestion: builder.mutation<
+      Question,
+      { questionId: string; title?: string; body?: string; lectureId?: string }
+    >({
+      query: ({ questionId, title, body }) => ({
+        url: `/questions/${questionId}`,
+        method: 'PUT',
+        body: { title, body },
+      }),
+      async onQueryStarted({ questionId, lectureId }, { dispatch, queryFulfilled }) {
+        try {
+          const { data } = await queryFulfilled
+          dispatch(
+            discussionApi.util.updateQueryData('getReplies', questionId, (draft) => {
+              if (draft.question) {
+                draft.question = { ...draft.question, ...data }
+              }
+            }),
+          )
+          if (lectureId) {
+            dispatch(
+              discussionApi.util.updateQueryData('getLectureDiscussion', lectureId, (draft) => {
+                draft.results = upsertById(draft.results, data)
+              }),
+            )
+          } else {
+            dispatch(
+              discussionApi.util.updateQueryData('getGeneralDiscussion', undefined, (draft) => {
+                draft.questions = upsertById(draft.questions, data)
+              }),
+            )
+          }
+        } catch {
+          return
+        }
+      },
+    }),
     deleteQuestion: builder.mutation<{ message: string }, { questionId: string; lectureId?: string }>({
       query: ({ questionId }) => ({
         url: `/questions/${questionId}`,
@@ -303,6 +340,29 @@ export const discussionApi = api.injectEndpoints({
               }),
             )
           }
+        } catch {
+          return
+        }
+      },
+    }),
+    updateReply: builder.mutation<
+      Reply,
+      { replyId: string; questionId: string; body: string }
+    >({
+      query: ({ replyId, body }) => ({
+        url: `/replies/${replyId}`,
+        method: 'PUT',
+        body: { body },
+      }),
+      async onQueryStarted({ replyId, questionId }, { dispatch, queryFulfilled }) {
+        try {
+          const { data } = await queryFulfilled
+          dispatch(
+            discussionApi.util.updateQueryData('getReplies', questionId, (draft) => {
+              const existing = draft.repliesList.find((item) => item.id === replyId)
+              draft.repliesList = upsertById(draft.repliesList, { ...existing, ...data } as Reply)
+            }),
+          )
         } catch {
           return
         }
@@ -432,7 +492,9 @@ export const {
   useAddReplyMutation,
   useToggleQuestionVoteMutation,
   useToggleReplyVoteMutation,
+  useUpdateQuestionMutation,
   useDeleteQuestionMutation,
+  useUpdateReplyMutation,
   useDeleteReplyMutation,
   useDiffQuestionsMutation,
   useDiffRepliesMutation,
