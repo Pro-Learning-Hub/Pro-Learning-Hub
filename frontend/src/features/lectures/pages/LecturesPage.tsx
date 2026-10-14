@@ -1,29 +1,48 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { Link } from 'react-router-dom'
 import { Plus, Search } from 'lucide-react'
-import { useGetSectionsQuery } from '../lecturesApiSlice'
+import {
+  useGetSectionsQuery,
+  useSearchLecturesQuery,
+  lecturesApi,
+  useDiffLecturesMutation,
+} from '../lecturesApiSlice'
 import { SectionAccordion } from '../components/SectionAccordion'
+import { LectureCard } from '../components/LectureCard'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { AlertCircle } from 'lucide-react'
-import { useAppSelector } from '@/store/hooks'
+import { useAppSelector, useAppDispatch } from '@/store/hooks'
+import { useDebounce } from '@/hooks/use-debounce'
 import { getSocket } from '@/lib/socket'
-import { api } from '@/lib/api'
-import { useAppDispatch } from '@/store/hooks'
+import { upsertById, removeById } from '@/lib/merge'
+import { setSectionsLastFetched } from '@/store/slices/syncSlice'
+import type { Lecture, Section } from '@/types/api.types'
 
 const courseId = import.meta.env.VITE_COURSE_ID
 
 export function LecturesPage() {
   const userRole = useAppSelector((s) => s.auth.user?.role)
   const isSocketReady = useAppSelector((s) => s.auth.isSocketReady)
+  const lastSynced = useAppSelector((s) => s.sync.sectionsLastSyncedAt)
   const dispatch = useAppDispatch()
   const [search, setSearch] = useState('')
+  const [diffLectures] = useDiffLecturesMutation()
+  const didDiff = useRef(false)
+
+  const debouncedSearch = useDebounce(search, 300)
+  const trimmedSearch = debouncedSearch.trim()
+  const showSearchList = Boolean(search.trim() && trimmedSearch)
 
   const { data, isLoading, isError } = useGetSectionsQuery()
+  const {
+    data: searchResults,
+    isFetching: isSearching,
+    isError: isSearchError,
+  } = useSearchLecturesQuery(trimmedSearch, { skip: !trimmedSearch })
 
-  // Join socket room
   useEffect(() => {
     const socket = getSocket()
     if (socket && courseId) {
@@ -33,39 +52,81 @@ export function LecturesPage() {
     }
   }, [isSocketReady])
 
-  // Socket real-time updates
+  useEffect(() => {
+    if (didDiff.current || !data?.sections?.length || !lastSynced) {
+      return
+    }
+    didDiff.current = true
+    const entries = data.sections.reduce<Record<string, string[]>>((acc, section) => {
+      acc[section.id] = section.lectures.map((lecture) => lecture.id)
+      return acc
+    }, {})
+    void diffLectures({ entries, lastSynced })
+  }, [data?.sections, lastSynced, diffLectures])
+
   useEffect(() => {
     const socket = getSocket()
     if (!socket) return
 
-    const invalidate = () => dispatch(api.util.invalidateTags(['Sections']))
+    const patch = (updater: (sections: Section[]) => Section[], lastFetched?: string) => {
+      dispatch(
+        lecturesApi.util.updateQueryData('getSections', undefined, (draft) => {
+          draft.sections = updater(draft.sections)
+          if (lastFetched) {
+            draft.lastFetched = lastFetched
+          }
+        }),
+      )
+      if (lastFetched) {
+        dispatch(setSectionsLastFetched(lastFetched))
+      }
+    }
 
-    socket.on('lectureCreated', invalidate)
-    socket.on('sectionCreated', invalidate)
-    socket.on('lectureUpdated', invalidate)
-    socket.on('lectureDeleted', invalidate)
+    const onLectureCreated = ({ payload }: { payload: { sectionId: string; lecture: Lecture; lastFetched: string } }) => {
+      patch(
+        (sections) =>
+          sections.map((section) =>
+            section.id === payload.sectionId
+              ? { ...section, lectures: upsertById(section.lectures, payload.lecture) }
+              : section,
+          ),
+        payload.lastFetched,
+      )
+    }
+    const onSectionCreated = ({ payload }: { payload: { newSection: Section; lastFetched: string } }) => {
+      patch((sections) => upsertById(sections, payload.newSection), payload.lastFetched)
+    }
+    const onLectureUpdated = ({ payload }: { payload: { updatedLecture: Lecture } }) => {
+      patch((sections) =>
+        sections.map((section) => ({
+          ...section,
+          lectures: upsertById(section.lectures, payload.updatedLecture),
+        })),
+      )
+    }
+    const onLectureDeleted = ({ payload }: { payload: { lectureId: string; sectionId: string } }) => {
+      patch((sections) =>
+        sections
+          .map((section) =>
+            section.id === payload.sectionId
+              ? { ...section, lectures: removeById(section.lectures, payload.lectureId) }
+              : section,
+          )
+          .filter((section) => section.lectures.length > 0),
+      )
+    }
 
+    socket.on('lectureCreated', onLectureCreated)
+    socket.on('sectionCreated', onSectionCreated)
+    socket.on('lectureUpdated', onLectureUpdated)
+    socket.on('lectureDeleted', onLectureDeleted)
     return () => {
-      socket.off('lectureCreated', invalidate)
-      socket.off('sectionCreated', invalidate)
-      socket.off('lectureUpdated', invalidate)
-      socket.off('lectureDeleted', invalidate)
+      socket.off('lectureCreated', onLectureCreated)
+      socket.off('sectionCreated', onSectionCreated)
+      socket.off('lectureUpdated', onLectureUpdated)
+      socket.off('lectureDeleted', onLectureDeleted)
     }
   }, [dispatch, isSocketReady])
-
-  const filteredSections = data?.sections
-    ?.map((section) => ({
-      ...section,
-      lectures: section.lectures?.filter((lec) => {
-        const q = search.toLowerCase()
-        return (
-          lec.title.toLowerCase().includes(q) ||
-          lec.description?.toLowerCase().includes(q) ||
-          lec.tags?.some((t) => t.toLowerCase().includes(q))
-        )
-      }),
-    }))
-    .filter((s) => !search || (s.lectures && s.lectures.length > 0))
 
   return (
     <div className="container mx-auto max-w-4xl px-4 py-8">
@@ -76,53 +137,72 @@ export function LecturesPage() {
         </p>
       </div>
 
-      {/* Search */}
       <div className="relative mb-6">
         <Search className="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
         <Input
-          placeholder="Search lectures, descriptions, and tags…"
+          placeholder="Search lectures..."
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           className="pl-9"
         />
       </div>
 
-      {isLoading && (
-        <div className="space-y-3">
-          {[1, 2, 3].map((i) => (
-            <Skeleton key={i} className="h-16 w-full rounded-lg" />
-          ))}
+      {userRole && userRole !== 'student' && (
+        <div className="mb-6 flex justify-end">
+          <Button asChild>
+            <Link to="/lectures/new" className="gap-2">
+              <Plus className="size-4" />
+              New Lecture
+            </Link>
+          </Button>
         </div>
       )}
 
-      {isError && (
-        <Alert variant="destructive">
-          <AlertCircle className="size-4" />
-          <AlertDescription>Failed to load lectures. Please try again.</AlertDescription>
-        </Alert>
-      )}
+      {showSearchList ? (
+        <div className="flex flex-col gap-2">
+          {isSearching && (
+            <div className="space-y-3">
+              {[1, 2, 3].map((i) => (
+                <Skeleton key={i} className="h-16 w-full rounded-lg" />
+              ))}
+            </div>
+          )}
 
-      {!isLoading && !isError && filteredSections && (
-        filteredSections.length > 0 ? (
-          <SectionAccordion sections={filteredSections} />
-        ) : (
-          <p className="text-center text-muted-foreground py-12">
-            {search ? 'No lectures match your search.' : 'No lectures yet.'}
-          </p>
-        )
-      )}
+          {!isSearching && isSearchError && (
+            <Alert variant="destructive">
+              <AlertCircle className="size-4" />
+              <AlertDescription>Failed to search lectures.</AlertDescription>
+            </Alert>
+          )}
 
-      {userRole && userRole !== 'student' && (
-        <Button
-          asChild
-          className="fixed bottom-6 right-6 shadow-lg gap-2"
-          size="lg"
-        >
-          <Link to="/lectures/new">
-            <Plus className="size-5" />
-            Add Lecture
-          </Link>
-        </Button>
+          {!isSearching && !isSearchError && searchResults?.length === 0 && (
+            <p className="text-center text-muted-foreground py-8">
+              No lectures match your search.
+            </p>
+          )}
+
+          {!isSearching &&
+            searchResults?.map((lecture) => <LectureCard key={lecture.id} lecture={lecture} />)}
+        </div>
+      ) : (
+        <>
+          {isLoading && (
+            <div className="space-y-3">
+              {[1, 2, 3].map((i) => (
+                <Skeleton key={i} className="h-16 w-full rounded-lg" />
+              ))}
+            </div>
+          )}
+
+          {isError && (
+            <Alert variant="destructive">
+              <AlertCircle className="size-4" />
+              <AlertDescription>Failed to load lectures.</AlertDescription>
+            </Alert>
+          )}
+
+          {data?.sections && <SectionAccordion sections={data.sections} />}
+        </>
       )}
     </div>
   )
