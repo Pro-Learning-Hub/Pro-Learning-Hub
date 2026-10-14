@@ -4,6 +4,9 @@ import { z } from 'zod'
 import { toast } from 'sonner'
 import { useAppDispatch } from '@/store/hooks'
 import { loginSuccess } from '@/store/slices/authSlice'
+import { http } from '@/lib/http'
+import { setSocketAuthToken } from '@/lib/socket'
+import { authResponseSchema } from '@/lib/schemas'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -19,16 +22,16 @@ const schema = z.object({
 
 type FormData = z.infer<typeof schema>
 
-const baseUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3000'
 const courseId = import.meta.env.VITE_COURSE_ID
 
 interface LoginFormProps {
   onSuccess?: () => void
+  isAdmin: boolean
+  onAdminChange: (value: boolean) => void
 }
 
-export function LoginForm({ onSuccess }: LoginFormProps) {
+export function LoginForm({ onSuccess, isAdmin, onAdminChange }: LoginFormProps) {
   const dispatch = useAppDispatch()
-  const [isAdmin, setIsAdmin] = useState(false)
   const [serverError, setServerError] = useState('')
 
   const {
@@ -39,21 +42,19 @@ export function LoginForm({ onSuccess }: LoginFormProps) {
 
   const onSubmit = async (data: FormData) => {
     setServerError('')
-    const url = isAdmin
-      ? `${baseUrl}/auth/admin/login`
-      : `${baseUrl}/auth/login`
+    const url = isAdmin ? '/auth/admin/login' : '/auth/login'
 
     try {
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: data.email, password: data.password, courseId }),
-      })
-      const json = await response.json()
-      if (!response.ok) {
-        throw new Error(json.message || 'Login failed')
-      }
-      dispatch(loginSuccess({ token: json.accessToken, user: json.user }))
+      const json = await http(
+        url,
+        {
+          method: 'POST',
+          body: JSON.stringify({ email: data.email, password: data.password, courseId }),
+        },
+        authResponseSchema,
+      )
+      setSocketAuthToken(json.accessToken)
+      dispatch(loginSuccess({ user: json.user }))
       toast.success('Welcome back!')
       onSuccess?.()
     } catch (err) {
@@ -103,7 +104,7 @@ export function LoginForm({ onSuccess }: LoginFormProps) {
         <input
           type="checkbox"
           checked={isAdmin}
-          onChange={(e) => setIsAdmin(e.target.checked)}
+          onChange={(e) => onAdminChange(e.target.checked)}
           className="rounded border-input"
         />
         Sign in as Admin

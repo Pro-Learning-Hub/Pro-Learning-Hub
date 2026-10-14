@@ -5,11 +5,15 @@ import { toast } from 'sonner'
 import { useState } from 'react'
 import { useAppDispatch } from '@/store/hooks'
 import { loginSuccess } from '@/store/slices/authSlice'
+import { http } from '@/lib/http'
+import { isImageKitConfigured, uploadToImageKit } from '@/lib/imagekit'
+import { setSocketAuthToken } from '@/lib/socket'
+import { authResponseSchema } from '@/lib/schemas'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Alert, AlertDescription } from '@/components/ui/alert'
-import { AlertCircle } from 'lucide-react'
+import { AlertCircle, Upload } from 'lucide-react'
 
 const schema = z
   .object({
@@ -26,7 +30,6 @@ const schema = z
 
 type FormData = z.infer<typeof schema>
 
-const baseUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3000'
 const courseId = import.meta.env.VITE_COURSE_ID
 
 interface RegisterFormProps {
@@ -36,6 +39,8 @@ interface RegisterFormProps {
 export function RegisterForm({ onSuccess }: RegisterFormProps) {
   const dispatch = useAppDispatch()
   const [serverError, setServerError] = useState('')
+  const [picture, setPicture] = useState<File | null>(null)
+  const [picturePreview, setPicturePreview] = useState('')
 
   const {
     register,
@@ -43,22 +48,44 @@ export function RegisterForm({ onSuccess }: RegisterFormProps) {
     formState: { errors, isSubmitting },
   } = useForm<FormData>({ resolver: zodResolver(schema) })
 
+  const handleFileSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0] ?? null
+    setPicture(file)
+    setPicturePreview(file ? URL.createObjectURL(file) : '')
+  }
+
   const onSubmit = async (data: FormData) => {
     setServerError('')
     try {
-      const response = await fetch(`${baseUrl}/auth/register`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          userData: { firstName: data.firstName, lastName: data.lastName, email: data.email, password: data.password },
-          courseId,
-        }),
-      })
-      const json = await response.json()
-      if (!response.ok) {
-        throw new Error(json.message || 'Registration failed')
+      let pictureFields: { pictureId: string; pictureURL: string; pictureThumbnail: string } | undefined
+      if (picture) {
+        const uploaded = await uploadToImageKit(picture)
+        pictureFields = {
+          pictureId: uploaded.fileId,
+          pictureURL: uploaded.url,
+          pictureThumbnail: uploaded.thumbnailUrl,
+        }
       }
-      dispatch(loginSuccess({ token: json.accessToken, user: json.user }))
+
+      const json = await http(
+        '/auth/register',
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            userData: {
+              firstName: data.firstName,
+              lastName: data.lastName,
+              email: data.email,
+              password: data.password,
+              ...pictureFields,
+            },
+            courseId,
+          }),
+        },
+        authResponseSchema,
+      )
+      setSocketAuthToken(json.accessToken)
+      dispatch(loginSuccess({ user: json.user }))
       toast.success('Account created successfully!')
       onSuccess?.()
     } catch (err) {
@@ -104,6 +131,28 @@ export function RegisterForm({ onSuccess }: RegisterFormProps) {
         <Input id="reg-confirm" type="password" placeholder="••••••••" {...register('confirmPassword')} aria-invalid={!!errors.confirmPassword} />
         {errors.confirmPassword && <p className="text-destructive text-sm">{errors.confirmPassword.message}</p>}
       </div>
+
+      {isImageKitConfigured() && (
+        <div className="grid gap-1">
+          <Label htmlFor="reg-picture">Profile Picture (optional)</Label>
+          <div className="flex items-center gap-3">
+            {picturePreview ? (
+              <img src={picturePreview} alt="Preview" className="size-12 rounded-full object-cover" />
+            ) : (
+              <div className="flex size-12 items-center justify-center rounded-full bg-muted">
+                <Upload className="size-5 text-muted-foreground" />
+              </div>
+            )}
+            <Input
+              id="reg-picture"
+              type="file"
+              accept="image/*"
+              onChange={handleFileSelect}
+              className="file:text-sm"
+            />
+          </div>
+        </div>
+      )}
 
       <Button type="submit" disabled={isSubmitting}>
         {isSubmitting ? 'Creating account…' : 'Create Account'}
