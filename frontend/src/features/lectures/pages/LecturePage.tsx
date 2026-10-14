@@ -1,6 +1,6 @@
 import { useParams, Link, useNavigate } from 'react-router-dom'
 import { ArrowLeft, ExternalLink, Download } from 'lucide-react'
-import { useGetLectureQuery } from '../lecturesApiSlice'
+import { lecturesApi, useGetLectureQuery } from '../lecturesApiSlice'
 import { ResourceList } from '../components/ResourceList'
 import { TagBadge } from '../components/TagBadge'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
@@ -13,11 +13,9 @@ import { extractVideoId } from '@/lib/utils'
 import { LectureDiscussionPage } from '../../discussion/pages/LectureDiscussionPage'
 import { useEffect } from 'react'
 import { getSocket } from '@/lib/socket'
-import { useAppSelector } from '@/store/hooks'
-import { api } from '@/lib/api'
-import { useAppDispatch } from '@/store/hooks'
-
-const apiBaseUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3000'
+import { useAppSelector, useAppDispatch } from '@/store/hooks'
+import { useYtDownload } from '../hooks/useYtDownload'
+import type { Lecture } from '@/types/api.types'
 
 export function LecturePage() {
   const { lectureId } = useParams<{ lectureId: string }>()
@@ -49,8 +47,12 @@ export function LecturePage() {
         navigate('/lectures', { replace: true })
       }
     }
-    const handleUpdated = () => {
-      dispatch(api.util.invalidateTags([{ type: 'Lecture', id: lectureId }]))
+    const handleUpdated = ({ payload }: { payload: { updatedLecture: Lecture } }) => {
+      dispatch(
+        lecturesApi.util.updateQueryData('getLecture', lectureId, (draft) => {
+          draft.lectureData = { ...draft.lectureData, ...payload.updatedLecture }
+        }),
+      )
     }
     socket.on('lectureDeleted', handleDeleted)
     socket.on('lectureUpdated', handleUpdated)
@@ -62,11 +64,7 @@ export function LecturePage() {
 
   const videoId = lecture ? extractVideoId(lecture.videoLink) : null
 
-  const getDownloadUrl = (type: 'audio' | 'video' | 'transcript' | 'subtitles') => {
-    if (!lecture?.videoLink) return '#'
-    const encoded = encodeURIComponent(lecture.videoLink)
-    return `${apiBaseUrl}/api/media/${type}?url=${encoded}`
-  }
+  const { downloadMedia, downloadTranscript, isTranscriptLoading } = useYtDownload()
 
   if (isLoading) {
     return (
@@ -170,14 +168,38 @@ export function LecturePage() {
             <div>
               <h3 className="font-semibold mb-2">Downloads</h3>
               <div className="flex flex-wrap gap-2">
-                {(['audio', 'video', 'transcript', 'subtitles'] as const).map((type) => (
-                  <Button key={type} asChild variant="outline" size="sm">
-                    <a href={getDownloadUrl(type)} target="_blank" rel="noopener noreferrer">
-                      <Download className="size-3 mr-1" />
-                      {type.charAt(0).toUpperCase() + type.slice(1)}
-                    </a>
-                  </Button>
-                ))}
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={!lecture.videoLink}
+                  onClick={() => lecture.videoLink && downloadMedia(lecture.videoLink, 'audio')}
+                >
+                  <Download className="size-3 mr-1" />Audio
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={!lecture.videoLink}
+                  onClick={() => lecture.videoLink && downloadMedia(lecture.videoLink, 'video')}
+                >
+                  <Download className="size-3 mr-1" />Video
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={!lecture.videoLink || isTranscriptLoading}
+                  onClick={() => lecture.videoLink && downloadTranscript(lecture.videoLink, 'transcript')}
+                >
+                  <Download className="size-3 mr-1" />Transcript
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={!lecture.videoLink || isTranscriptLoading}
+                  onClick={() => lecture.videoLink && downloadTranscript(lecture.videoLink, 'subtitles')}
+                >
+                  <Download className="size-3 mr-1" />Subtitles
+                </Button>
               </div>
             </div>
 
