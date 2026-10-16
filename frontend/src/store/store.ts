@@ -3,18 +3,31 @@ import { persistStore, persistReducer } from 'redux-persist'
 import storage from 'redux-persist/lib/storage'
 import authReducer from './slices/authSlice'
 import uiReducer from './slices/uiSlice'
+import syncReducer from './slices/syncSlice'
 import { api } from '@/lib/api'
 
 const authPersistConfig = {
   key: 'auth',
   storage,
-  whitelist: ['token', 'user', 'isLoggedIn'],
+  whitelist: ['user', 'isLoggedIn'],
+}
+
+const syncPersistConfig = {
+  key: 'sync',
+  storage,
+}
+
+const apiPersistConfig = {
+  key: 'api',
+  storage,
+  whitelist: ['queries'],
 }
 
 const rootReducer = combineReducers({
   auth: persistReducer(authPersistConfig, authReducer),
   ui: uiReducer,
-  [api.reducerPath]: api.reducer,
+  sync: persistReducer(syncPersistConfig, syncReducer),
+  [api.reducerPath]: persistReducer(apiPersistConfig, api.reducer),
 })
 
 export const store = configureStore({
@@ -22,7 +35,7 @@ export const store = configureStore({
   middleware: (getDefaultMiddleware) =>
     getDefaultMiddleware({
       serializableCheck: {
-        ignoredActions: ['persist/PERSIST', 'persist/REHYDRATE'],
+        ignoredActions: ['persist/PERSIST', 'persist/REHYDRATE', 'persist/PAUSE', 'persist/FLUSH', 'persist/PURGE', 'persist/REGISTER'],
       },
     }).concat(api.middleware),
 })

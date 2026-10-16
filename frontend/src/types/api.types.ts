@@ -61,7 +61,7 @@ export interface Question {
   body: string
   user: User
   upvotes: number
-  isUpvoted: boolean
+  upvoted: boolean
   repliesCount: number
   lectureId?: string
   courseId?: string
@@ -75,7 +75,7 @@ export interface Reply {
   user: User
   questionId: string
   upvotes: number
-  isUpvoted: boolean
+  upvoted: boolean
   updatedAt: string
   createdAt: string
 }
