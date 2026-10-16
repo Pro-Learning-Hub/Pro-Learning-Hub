@@ -2,9 +2,11 @@ import { useGoogleLogin } from '@react-oauth/google'
 import { toast } from 'sonner'
 import { useAppDispatch } from '@/store/hooks'
 import { loginSuccess } from '@/store/slices/authSlice'
+import { http } from '@/lib/http'
+import { setSocketAuthToken } from '@/lib/socket'
+import { authResponseSchema } from '@/lib/schemas'
 import { Button } from '@/components/ui/button'
 
-const baseUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3000'
 const courseId = import.meta.env.VITE_COURSE_ID
 
 interface GoogleAuthButtonProps {
@@ -21,21 +23,23 @@ export function GoogleAuthButton({ mode, isAdmin = false, onSuccess }: GoogleAut
       try {
         let url: string
         if (mode === 'register') {
-          url = `${baseUrl}/auth/oauth/googleRegister`
+          url = '/auth/oauth/googleRegister'
         } else if (isAdmin) {
-          url = `${baseUrl}/auth/admin/oauth/google`
+          url = '/auth/admin/oauth/google'
         } else {
-          url = `${baseUrl}/auth/oauth/google`
+          url = '/auth/oauth/google'
         }
 
-        const response = await fetch(url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ token: tokenResponse.access_token, courseId }),
-        })
-        const json = await response.json()
-        if (!response.ok) throw new Error(json.message || 'Google auth failed')
-        dispatch(loginSuccess({ token: json.accessToken, user: json.user }))
+        const json = await http(
+          url,
+          {
+            method: 'POST',
+            body: JSON.stringify({ token: tokenResponse.access_token, courseId }),
+          },
+          authResponseSchema,
+        )
+        setSocketAuthToken(json.accessToken)
+        dispatch(loginSuccess({ user: json.user }))
         toast.success('Signed in with Google!')
         onSuccess?.()
       } catch (err) {

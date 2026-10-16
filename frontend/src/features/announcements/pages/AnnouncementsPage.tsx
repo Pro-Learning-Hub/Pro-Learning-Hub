@@ -1,9 +1,11 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { CirclePlus } from 'lucide-react'
 import { toast } from 'sonner'
 import {
+  announcementsApi,
   useGetAnnouncementsQuery,
   useCreateAnnouncementMutation,
+  useDiffAnnouncementsMutation,
 } from '../announcementsApiSlice'
 import { AnnouncementCard } from '../components/AnnouncementCard'
 import { AnnouncementForm } from '../components/AnnouncementForm'
@@ -11,10 +13,11 @@ import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { AlertCircle } from 'lucide-react'
-import { useAppSelector } from '@/store/hooks'
+import { useAppSelector, useAppDispatch } from '@/store/hooks'
 import { getSocket } from '@/lib/socket'
-import { api } from '@/lib/api'
-import { useAppDispatch } from '@/store/hooks'
+import { upsertById, removeById } from '@/lib/merge'
+import { setAnnouncementsLastFetched } from '@/store/slices/syncSlice'
+import type { Announcement } from '@/types/api.types'
 
 const courseId = import.meta.env.VITE_COURSE_ID
 
@@ -23,11 +26,12 @@ export function AnnouncementsPage() {
   const isSocketReady = useAppSelector((s) => s.auth.isSocketReady)
   const dispatch = useAppDispatch()
   const [showForm, setShowForm] = useState(false)
+  const didDiff = useRef(false)
 
   const { data, isLoading, isError } = useGetAnnouncementsQuery()
   const [createAnnouncement] = useCreateAnnouncementMutation()
+  const [diffAnnouncements] = useDiffAnnouncementsMutation()
 
-  // Join announcements room
   useEffect(() => {
     const socket = getSocket()
     if (socket && courseId) {
@@ -37,18 +41,54 @@ export function AnnouncementsPage() {
     }
   }, [isSocketReady])
 
-  // Real-time updates
+  useEffect(() => {
+    if (didDiff.current || !data?.announcements?.length) {
+      return
+    }
+    didDiff.current = true
+    void diffAnnouncements(
+      data.announcements.map((announcement) => ({
+        id: announcement.id,
+        updatedAt: announcement.updatedAt,
+      })),
+    )
+  }, [data?.announcements, diffAnnouncements])
+
   useEffect(() => {
     const socket = getSocket()
     if (!socket) return
-    const invalidate = () => dispatch(api.util.invalidateTags(['Announcements']))
-    socket.on('announcementCreated', invalidate)
-    socket.on('announcementDeleted', invalidate)
-    socket.on('announcementUpdated', invalidate)
+
+    const patch = (updater: (announcements: Announcement[]) => Announcement[], lastFetched?: string) => {
+      dispatch(
+        announcementsApi.util.updateQueryData('getAnnouncements', undefined, (draft) => {
+          draft.announcements = updater(draft.announcements)
+          if (lastFetched) {
+            draft.lastFetched = lastFetched
+          }
+        }),
+      )
+      if (lastFetched) {
+        dispatch(setAnnouncementsLastFetched(lastFetched))
+      }
+    }
+
+    const onCreated = ({ payload, lastFetched }: { payload: Announcement; lastFetched?: string }) => {
+      patch((announcements) => upsertById(announcements, payload), lastFetched)
+    }
+    const onDeleted = ({ payload }: { payload: { announcementId: string } }) => {
+      patch((announcements) => removeById(announcements, payload.announcementId))
+    }
+    const onUpdated = ({ payload }: { payload: { updatedAnnouncement: Announcement } }) => {
+      patch((announcements) => upsertById(announcements, payload.updatedAnnouncement))
+    }
+
+    socket.on('announcementCreated', onCreated)
+    socket.on('announcementDeleted', onDeleted)
+    socket.on('announcementUpdated', onUpdated)
     return () => {
-      socket.off('announcementCreated', invalidate)
-      socket.off('announcementDeleted', invalidate)
-      socket.off('announcementUpdated', invalidate)
+      socket.off('announcementCreated', onCreated)
+      socket.off('announcementDeleted', onDeleted)
+      socket.off('announcementUpdated', onUpdated)
     }
   }, [dispatch, isSocketReady])
 

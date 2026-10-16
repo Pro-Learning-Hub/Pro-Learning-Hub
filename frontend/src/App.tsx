@@ -46,12 +46,11 @@ function PrivateRoute() {
 
 function useSocketConnection() {
   const isLoggedIn = useAppSelector((s) => s.auth.isLoggedIn)
-  const token = useAppSelector((s) => s.auth.token)
   const dispatch = useAppDispatch()
 
   useEffect(() => {
-    if (isLoggedIn && token) {
-      connectSocket(token)
+    if (isLoggedIn) {
+      connectSocket()
         .then(() => dispatch(setSocketReady(true)))
         .catch((err) => {
           console.error('Socket connection failed:', err)
@@ -61,7 +60,7 @@ function useSocketConnection() {
       disconnectSocket()
       dispatch(setSocketReady(false))
     }
-  }, [isLoggedIn, token, dispatch])
+  }, [isLoggedIn, dispatch])
 }
 
 export default function App() {
