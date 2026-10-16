@@ -1,6 +1,12 @@
-import { IsString, IsOptional } from 'class-validator';
+import { Type } from 'class-transformer';
+import { IsArray, IsOptional, IsString, ValidateNested } from 'class-validator';
+import { LectureResourceInputDto } from './lecture-resource.dto';
 
 export class UpdateLectureDto {
+  @IsString()
+  @IsOptional()
+  name?: string;
+
   @IsString()
   @IsOptional()
   title?: string;
@@ -9,9 +15,12 @@ export class UpdateLectureDto {
   @IsOptional()
   description?: string;
 
+  @IsOptional()
+  tags?: string[] | string;
+
   @IsString()
   @IsOptional()
-  tags?: string;
+  youtubeLink?: string;
 
   @IsString()
   @IsOptional()
@@ -19,11 +28,15 @@ export class UpdateLectureDto {
 
   @IsString()
   @IsOptional()
+  notesLink?: string;
+
+  @IsString()
+  @IsOptional()
   notes?: string;
 
   @IsString()
   @IsOptional()
-  audioLink?: string;
+  slidesLink?: string;
 
   @IsString()
   @IsOptional()
@@ -31,12 +44,17 @@ export class UpdateLectureDto {
 
   @IsString()
   @IsOptional()
-  subtitles?: string;
-
-  @IsString()
-  @IsOptional()
-  transcript?: string;
+  section?: string;
 
   @IsOptional()
-  resources?: Array<{ id?: string; title: string; url: string; type: string }>;
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => LectureResourceInputDto)
+  demos?: LectureResourceInputDto[];
+
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => LectureResourceInputDto)
+  extras?: LectureResourceInputDto[];
 }

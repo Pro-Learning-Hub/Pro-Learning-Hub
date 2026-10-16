@@ -1,115 +1,179 @@
-import { Injectable, NotFoundException, ForbiddenException } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, DataSource } from 'typeorm';
+import { Injectable } from '@nestjs/common';
+import { and, eq, gt, inArray } from 'drizzle-orm';
 import { v4 as uuidv4 } from 'uuid';
-import { Announcement } from './announcement.entity';
+import { DrizzleService } from '../database/drizzle.service';
+import { announcements } from '../database/schema';
 import { CoursesService } from '../courses/courses.service';
 import { UsersService } from '../users/users.service';
+import { EventsGateway } from '../gateway/events.gateway';
+import { fail, ok, ServiceResult } from '../common/types/service-result';
+import { formatDbTimestamp, getCurrentTimeInDBFormat, parseDbTime, withFormattedTimestamps } from '../common/time';
 import { CreateAnnouncementDto } from './dto/create-announcement.dto';
 import { UpdateAnnouncementDto } from './dto/update-announcement.dto';
-
-function getCurrentTimeInDBFormat(): string {
-  return new Date().toISOString().replace('T', ' ').replace('Z', '');
-}
 
 @Injectable()
 export class AnnouncementsService {
   constructor(
-    @InjectRepository(Announcement)
-    private readonly announcementRepository: Repository<Announcement>,
-    private readonly dataSource: DataSource,
+    private readonly drizzle: DrizzleService,
     private readonly coursesService: CoursesService,
     private readonly usersService: UsersService,
+    private readonly events: EventsGateway,
   ) {}
 
-  async getAnnouncements(courseId: string, userId: string, lastFetched?: string) {
-    const [course] = await this.dataSource.query('SELECT id FROM courses WHERE id = ?', [courseId]);
-    if (!course) throw new NotFoundException('Course not found');
+  private get db() {
+    return this.drizzle.db;
+  }
 
-    const isEnrolled = await this.coursesService.isUserEnrolledInCourse(userId, courseId);
-    const isAdmin = await this.coursesService.isCourseAdmin(userId, courseId);
-    if (!isEnrolled && !isAdmin) throw new ForbiddenException('User is not enrolled in this course');
+  private bodyFromDto(dto: { details?: string; body?: string }) {
+    return dto.details ?? dto.body;
+  }
 
-    const params = [courseId, ...(lastFetched ? [lastFetched] : [])];
-    const announcements = await this.dataSource.query(
-      `SELECT * FROM announcements WHERE courseId = ? ${lastFetched ? 'AND createdAt > ?' : ''} ORDER BY createdAt DESC`,
-      params,
-    );
-
-    const results: any[] = [];
-    for (const announcement of announcements) {
+  async getAnnouncements(
+    courseId: string,
+    userId: string,
+    lastFetched?: string,
+  ): Promise<ServiceResult<{ announcements: unknown[]; lastFetched: string }>> {
+    const course = await this.coursesService.findById(courseId);
+    if (!course) {
+      return fail('not_found', 'Course not found');
+    }
+    if (!(await this.coursesService.canAccessCourse(userId, courseId))) {
+      return fail('forbidden', 'User is not enrolled in this course');
+    }
+    const filters = [eq(announcements.courseId, courseId)];
+    if (lastFetched) {
+      filters.push(gt(announcements.createdAt, parseDbTime(lastFetched)));
+    }
+    const rows = await this.db
+      .select()
+      .from(announcements)
+      .where(and(...filters))
+      .orderBy(announcements.createdAt);
+    const results = [];
+    for (const announcement of rows.reverse()) {
       const user = await this.usersService.getUserPublicData(announcement.userId);
-      const { userId: _, ...rest } = announcement;
+      const { userId: _userId, ...rest } = withFormattedTimestamps(announcement);
       results.push({ ...rest, user });
     }
-
-    return { announcements: results, lastFetched: getCurrentTimeInDBFormat() };
+    return ok({ announcements: results, lastFetched: getCurrentTimeInDBFormat() });
   }
 
-  async createAnnouncement(courseId: string, userId: string, dto: CreateAnnouncementDto) {
-    const isAdmin = await this.coursesService.isCourseAdmin(userId, courseId);
-    if (!isAdmin) throw new ForbiddenException('User is not a course admin');
-
-    const id = uuidv4();
-    await this.dataSource.query(
-      'INSERT INTO announcements (id, courseId, userId, title, body) VALUES (?, ?, ?, ?, ?)',
-      [id, courseId, userId, dto.title, dto.body],
-    );
-
-    const user = await this.usersService.getUserPublicData(userId);
-    const [newAnnouncement] = await this.dataSource.query('SELECT * FROM announcements WHERE id = ?', [id]);
-    const { userId: _, ...rest } = newAnnouncement;
-    const lastFetched = getCurrentTimeInDBFormat();
-
-    return { ...rest, lastFetched, user };
-  }
-
-  async updateAnnouncement(id: string, userId: string, dto: UpdateAnnouncementDto) {
-    const [announcement] = await this.dataSource.query('SELECT courseId FROM announcements WHERE id = ?', [id]);
-    if (!announcement) throw new NotFoundException('Announcement not found');
-
-    const isAdmin = await this.coursesService.isCourseAdmin(userId, announcement.courseId);
-    if (!isAdmin) throw new ForbiddenException('User is not a course admin');
-
-    const updateFields: string[] = [];
-    const updateValues: any[] = [];
-    if (dto.title !== undefined) { updateFields.push('title = ?'); updateValues.push(dto.title); }
-    if (dto.body !== undefined) { updateFields.push('body = ?'); updateValues.push(dto.body); }
-
-    if (updateFields.length > 0) {
-      await this.dataSource.query(
-        `UPDATE announcements SET ${updateFields.join(', ')} WHERE id = ?`,
-        [...updateValues, id],
-      );
+  async createAnnouncement(
+    courseId: string,
+    userId: string,
+    dto: CreateAnnouncementDto,
+  ): Promise<ServiceResult<Record<string, unknown>>> {
+    const body = this.bodyFromDto(dto);
+    if (!dto.title || !body) {
+      return fail('validation_error', 'Missing required fields');
     }
-
-    const [updated] = await this.dataSource.query('SELECT * FROM announcements WHERE id = ?', [id]);
-    const { userId: _, ...rest } = updated;
-    return rest;
-  }
-
-  async deleteAnnouncement(id: string, userId: string) {
-    const [announcement] = await this.dataSource.query('SELECT courseId FROM announcements WHERE id = ?', [id]);
-    if (!announcement) throw new NotFoundException('Announcement not found');
-
-    const isAdmin = await this.coursesService.isCourseAdmin(userId, announcement.courseId);
-    if (!isAdmin) throw new ForbiddenException('User is not a course admin');
-
-    await this.dataSource.query('DELETE FROM announcements WHERE id = ?', [id]);
-    return { message: 'Announcement deleted successfully', courseId: announcement.courseId };
-  }
-
-  async diffSync(courseId: string, userId: string, ids: string[]) {
-    const isEnrolled = await this.coursesService.isUserEnrolledInCourse(userId, courseId);
-    const isAdmin = await this.coursesService.isCourseAdmin(userId, courseId);
-    if (!isEnrolled && !isAdmin) throw new ForbiddenException('Not authorized');
-
-    const existing = await this.dataSource.query(
-      'SELECT id FROM announcements WHERE courseId = ?',
-      [courseId],
+    if (!(await this.coursesService.isCourseAdmin(userId, courseId))) {
+      return fail('forbidden', 'User is not a course admin');
+    }
+    const id = uuidv4();
+    await this.db.insert(announcements).values({
+      id,
+      courseId,
+      userId,
+      title: dto.title,
+      body,
+    });
+    const [created] = await this.db.select().from(announcements).where(eq(announcements.id, id)).limit(1);
+    const user = await this.usersService.getUserPublicData(userId);
+    const { userId: _userId, ...rest } = withFormattedTimestamps(created);
+    const lastFetched = getCurrentTimeInDBFormat();
+    this.events.emitToRoom(
+      `announcements-${courseId}`,
+      'announcementCreated',
+      { payload: rest, userId, lastFetched },
+      userId,
     );
-    const existingIds = existing.map((a: any) => a.id);
-    const deleted = ids.filter((id) => !existingIds.includes(id));
-    return { deleted };
+    return ok({ ...rest, lastFetched, user });
+  }
+
+  async updateAnnouncement(
+    id: string,
+    userId: string,
+    dto: UpdateAnnouncementDto,
+  ): Promise<ServiceResult<Record<string, unknown>>> {
+    const [announcement] = await this.db
+      .select()
+      .from(announcements)
+      .where(eq(announcements.id, id))
+      .limit(1);
+    if (!announcement) {
+      return fail('not_found', 'Announcement not found');
+    }
+    if (!(await this.coursesService.isCourseAdmin(userId, announcement.courseId))) {
+      return fail('forbidden', 'User is not a course admin');
+    }
+    const body = this.bodyFromDto(dto);
+    await this.db
+      .update(announcements)
+      .set({
+        title: dto.title ?? announcement.title,
+        body: body ?? announcement.body,
+      })
+      .where(eq(announcements.id, id));
+    const [updated] = await this.db.select().from(announcements).where(eq(announcements.id, id)).limit(1);
+    const user = await this.usersService.getUserPublicData(updated.userId);
+    const { userId: _userId, ...rest } = withFormattedTimestamps(updated);
+    const updatedAnnouncement = { ...rest, user };
+    this.events.emitToRoom(
+      `announcements-${announcement.courseId}`,
+      'announcementUpdated',
+      { payload: { updatedAnnouncement } },
+      userId,
+    );
+    return ok(updatedAnnouncement);
+  }
+
+  async deleteAnnouncement(id: string, userId: string): Promise<ServiceResult<{ success: true; message: string }>> {
+    const [announcement] = await this.db
+      .select()
+      .from(announcements)
+      .where(eq(announcements.id, id))
+      .limit(1);
+    if (!announcement) {
+      return fail('not_found', 'Announcement not found');
+    }
+    if (!(await this.coursesService.isCourseAdmin(userId, announcement.courseId))) {
+      return fail('forbidden', 'User is not a course admin');
+    }
+    await this.db.delete(announcements).where(eq(announcements.id, id));
+    this.events.emitToRoom(
+      `announcements-${announcement.courseId}`,
+      'announcementDeleted',
+      { payload: { announcementId: id }, userId },
+      userId,
+    );
+    return ok({ success: true, message: 'Announcement deleted successfully' });
+  }
+
+  async diffSync(
+    courseId: string,
+    userId: string,
+    entries: Array<{ id: string; updatedAt: string }>,
+  ): Promise<ServiceResult<{ updated: unknown[]; deleted: string[] }>> {
+    const course = await this.coursesService.findById(courseId);
+    if (!course) {
+      return fail('not_found', 'Course not found');
+    }
+    if (!(await this.coursesService.canAccessCourse(userId, courseId))) {
+      return fail('forbidden', 'User is not enrolled in this course');
+    }
+    const map = new Map(entries.map((entry) => [entry.id, entry.updatedAt]));
+    const ids = Array.from(map.keys());
+    const dbRows = ids.length
+      ? await this.db.select().from(announcements).where(inArray(announcements.id, ids))
+      : [];
+    const updated = [];
+    for (const entry of dbRows) {
+      if (map.get(entry.id) !== formatDbTimestamp(entry.updatedAt)) {
+        updated.push(withFormattedTimestamps(entry));
+      }
+      map.delete(entry.id);
+    }
+    return ok({ updated, deleted: Array.from(map.keys()) });
   }
 }

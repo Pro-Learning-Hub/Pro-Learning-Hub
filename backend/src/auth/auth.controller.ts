@@ -1,59 +1,74 @@
-import { Controller, Post, Get, Body, UseGuards, HttpCode, HttpStatus } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, HttpStatus, Post, Res } from '@nestjs/common';
+import { Response } from 'express';
 import { AuthService } from './auth.service';
 import { LoginDto } from './dto/login.dto';
 import { RegisterDto } from './dto/register.dto';
 import { GoogleAuthDto } from './dto/google-auth.dto';
-import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
+import { Public } from '../common/decorators/public.decorator';
+import { unwrapResult } from '../common/http/map-service-result';
+import { clearAccessTokenCookie, setAccessTokenCookie } from './cookie';
 
 @Controller('auth')
 export class AuthController {
   constructor(private readonly authService: AuthService) {}
 
+  private writeSession(res: Response, payload: { accessToken: string }) {
+    setAccessTokenCookie(res, payload.accessToken);
+    return payload;
+  }
+
+  @Public()
   @Post('login')
   @HttpCode(HttpStatus.OK)
-  async login(@Body() dto: LoginDto) {
-    return this.authService.login(dto);
+  async login(@Body() dto: LoginDto, @Res({ passthrough: true }) res: Response) {
+    return this.writeSession(res, unwrapResult(await this.authService.login(dto)));
   }
 
+  @Public()
   @Post('register')
   @HttpCode(HttpStatus.CREATED)
-  async register(@Body() dto: RegisterDto) {
-    return this.authService.register(dto);
+  async register(@Body() dto: RegisterDto, @Res({ passthrough: true }) res: Response) {
+    return this.writeSession(res, unwrapResult(await this.authService.register(dto)));
   }
 
+  @Public()
   @Post('oauth/google')
   @HttpCode(HttpStatus.OK)
-  async googleLogin(@Body() dto: GoogleAuthDto) {
-    return this.authService.googleLogin(dto);
+  async googleLogin(@Body() dto: GoogleAuthDto, @Res({ passthrough: true }) res: Response) {
+    return this.writeSession(res, unwrapResult(await this.authService.googleLogin(dto)));
   }
 
+  @Public()
   @Post('oauth/googleRegister')
   @HttpCode(HttpStatus.CREATED)
-  async googleRegister(@Body() dto: GoogleAuthDto) {
-    return this.authService.googleRegister(dto);
+  async googleRegister(@Body() dto: GoogleAuthDto, @Res({ passthrough: true }) res: Response) {
+    return this.writeSession(res, unwrapResult(await this.authService.googleRegister(dto)));
   }
 
+  @Public()
   @Post('admin/login')
   @HttpCode(HttpStatus.OK)
-  async adminLogin(@Body() dto: LoginDto) {
-    return this.authService.adminLogin(dto);
+  async adminLogin(@Body() dto: LoginDto, @Res({ passthrough: true }) res: Response) {
+    return this.writeSession(res, unwrapResult(await this.authService.adminLogin(dto)));
   }
 
+  @Public()
   @Post('admin/oauth/google')
   @HttpCode(HttpStatus.OK)
-  async adminGoogleLogin(@Body() dto: GoogleAuthDto) {
-    return this.authService.adminGoogleLogin(dto);
+  async adminGoogleLogin(@Body() dto: GoogleAuthDto, @Res({ passthrough: true }) res: Response) {
+    return this.writeSession(res, unwrapResult(await this.authService.adminGoogleLogin(dto)));
   }
 
-  @UseGuards(JwtAuthGuard)
   @Post('logout')
   @HttpCode(HttpStatus.OK)
-  async logout() {
-    return this.authService.logout();
+  async logout(@Res({ passthrough: true }) res: Response) {
+    clearAccessTokenCookie(res);
+    return unwrapResult(this.authService.logout());
   }
 
+  @Public()
   @Get('imagekit')
   getImagekitAuth() {
-    return this.authService.getImagekitAuth();
+    return unwrapResult(this.authService.getImagekitAuth());
   }
 }

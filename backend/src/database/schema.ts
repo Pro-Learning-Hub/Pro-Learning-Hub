@@ -1,0 +1,10 @@
+export { users } from './entities/users';
+export { courses, courseAdmins, courseEnrollments } from './entities/courses';
+export { sections } from './entities/sections';
+export { lectures } from './entities/lectures';
+export { lectureResources } from './entities/lecture-resources';
+export { questions } from './entities/questions';
+export { replies } from './entities/replies';
+export { votes } from './entities/votes';
+export { announcements } from './entities/announcements';
+export { comments } from './entities/comments';

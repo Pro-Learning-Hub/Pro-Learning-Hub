@@ -1,16 +1,36 @@
 import {
-  WebSocketGateway,
-  WebSocketServer,
-  SubscribeMessage,
+  ConnectedSocket,
+  MessageBody,
   OnGatewayConnection,
   OnGatewayDisconnect,
-  MessageBody,
-  ConnectedSocket,
+  SubscribeMessage,
+  WebSocketGateway,
+  WebSocketServer,
 } from '@nestjs/websockets';
 import { Server, Socket } from 'socket.io';
 import { JwtService } from '@nestjs/jwt';
 
-@WebSocketGateway({ cors: { origin: '*' } })
+function tokenFromHandshake(client: Socket): string | undefined {
+  const authToken = client.handshake.auth?.token;
+  if (typeof authToken === 'string' && authToken) {
+    return authToken;
+  }
+  const header = client.handshake.headers?.authorization;
+  if (typeof header === 'string' && header.startsWith('Bearer ')) {
+    return header.slice(7);
+  }
+  const cookieHeader = client.handshake.headers?.cookie;
+  if (!cookieHeader) {
+    return undefined;
+  }
+  const match = cookieHeader
+    .split(';')
+    .map((part) => part.trim())
+    .find((part) => part.startsWith('access_token='));
+  return match ? decodeURIComponent(match.slice('access_token='.length)) : undefined;
+}
+
+@WebSocketGateway({ cors: { origin: true, credentials: true } })
 export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
   @WebSocketServer()
   server: Server;
@@ -19,20 +39,23 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
   async handleConnection(client: Socket) {
     try {
-      const token = client.handshake.auth?.token || client.handshake.headers?.authorization?.split(' ')[1];
+      const token = tokenFromHandshake(client);
       if (!token) {
         client.disconnect();
         return;
       }
-      const payload = this.jwtService.verify(token, { secret: process.env.TOKEN_SECRET_KEY });
-      (client as any).user = payload;
+      const payload = this.jwtService.verify(token, {
+        secret: process.env.TOKEN_SECRET_KEY,
+      });
+      (client as Socket & { user: typeof payload }).user = payload;
+      client.join(`user-${payload.userId}`);
     } catch {
       client.disconnect();
     }
   }
 
   handleDisconnect(_client: Socket) {
-    // No cleanup needed for stateless connections
+    return;
   }
 
   @SubscribeMessage('joinRoom')
@@ -45,11 +68,12 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
     client.leave(room);
   }
 
-  emitToRoom(room: string, event: string, data: any, excludeSocket?: string) {
-    if (excludeSocket) {
-      this.server.to(room).except(excludeSocket).emit(event, data);
-    } else {
-      this.server.to(room).emit(event, data);
+  emitToRoom(room: string | string[], event: string, data: unknown, excludeUserId?: string) {
+    const rooms = Array.isArray(room) ? room : [room];
+    let target = this.server.to(rooms);
+    if (excludeUserId) {
+      target = target.except(`user-${excludeUserId}`);
     }
+    target.emit(event, data);
   }
 }

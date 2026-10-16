@@ -1,9 +1,6 @@
-import {
-  Controller, Get, Post, Put, Delete, Param, Body, Query,
-  UseGuards, HttpCode, HttpStatus,
-} from '@nestjs/common';
-import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
-import { CurrentUser } from '../common/decorators/current-user.decorator';
+import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Param, Post, Put, Query } from '@nestjs/common';
+import { CurrentUser, RequestUser } from '../common/decorators/current-user.decorator';
+import { unwrapResult } from '../common/http/map-service-result';
 import { AnnouncementsService } from './announcements.service';
 import { CreateAnnouncementDto } from './dto/create-announcement.dto';
 import { UpdateAnnouncementDto } from './dto/update-announcement.dto';
@@ -12,53 +9,50 @@ import { UpdateAnnouncementDto } from './dto/update-announcement.dto';
 export class AnnouncementsController {
   constructor(private readonly announcementsService: AnnouncementsService) {}
 
-  @UseGuards(JwtAuthGuard)
   @Get('courses/:id/announcements')
   async getAnnouncements(
     @Param('id') courseId: string,
     @Query('lastFetched') lastFetched: string,
-    @CurrentUser() user: any,
+    @CurrentUser() user: RequestUser,
   ) {
-    return this.announcementsService.getAnnouncements(courseId, user.userId, lastFetched);
+    return unwrapResult(
+      await this.announcementsService.getAnnouncements(courseId, user.userId, lastFetched),
+    );
   }
 
-  @UseGuards(JwtAuthGuard)
   @Post('courses/:id/announcements')
   @HttpCode(HttpStatus.CREATED)
   async createAnnouncement(
     @Param('id') courseId: string,
     @Body() dto: CreateAnnouncementDto,
-    @CurrentUser() user: any,
+    @CurrentUser() user: RequestUser,
   ) {
-    return this.announcementsService.createAnnouncement(courseId, user.userId, dto);
+    return unwrapResult(
+      await this.announcementsService.createAnnouncement(courseId, user.userId, dto),
+    );
   }
 
-  @UseGuards(JwtAuthGuard)
   @Put('announcements/:id')
   async updateAnnouncement(
     @Param('id') id: string,
     @Body() dto: UpdateAnnouncementDto,
-    @CurrentUser() user: any,
+    @CurrentUser() user: RequestUser,
   ) {
-    return this.announcementsService.updateAnnouncement(id, user.userId, dto);
+    return unwrapResult(await this.announcementsService.updateAnnouncement(id, user.userId, dto));
   }
 
-  @UseGuards(JwtAuthGuard)
   @Delete('announcements/:id')
-  async deleteAnnouncement(
-    @Param('id') id: string,
-    @CurrentUser() user: any,
-  ) {
-    return this.announcementsService.deleteAnnouncement(id, user.userId);
+  async deleteAnnouncement(@Param('id') id: string, @CurrentUser() user: RequestUser) {
+    return unwrapResult(await this.announcementsService.deleteAnnouncement(id, user.userId));
   }
 
-  @UseGuards(JwtAuthGuard)
   @Post('courses/:id/announcements/diff')
   async diffSync(
     @Param('id') courseId: string,
-    @Body('ids') ids: string[],
-    @CurrentUser() user: any,
+    @Body() body: Array<{ id: string; updatedAt: string }>,
+    @CurrentUser() user: RequestUser,
   ) {
-    return this.announcementsService.diffSync(courseId, user.userId, ids);
+    const entries = Array.isArray(body) ? body : [];
+    return unwrapResult(await this.announcementsService.diffSync(courseId, user.userId, entries));
   }
 }

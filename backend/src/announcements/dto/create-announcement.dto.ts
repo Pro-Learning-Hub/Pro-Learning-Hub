@@ -1,4 +1,4 @@
-import { IsString, IsNotEmpty } from 'class-validator';
+import { IsNotEmpty, IsOptional, IsString } from 'class-validator';
 
 export class CreateAnnouncementDto {
   @IsString()
@@ -6,6 +6,10 @@ export class CreateAnnouncementDto {
   title: string;
 
   @IsString()
-  @IsNotEmpty()
-  body: string;
+  @IsOptional()
+  details?: string;
+
+  @IsString()
+  @IsOptional()
+  body?: string;
 }

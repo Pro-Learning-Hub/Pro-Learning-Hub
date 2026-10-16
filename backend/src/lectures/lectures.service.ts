@@ -1,179 +1,547 @@
-import { Injectable, NotFoundException, ForbiddenException } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, DataSource } from 'typeorm';
+import { Injectable } from '@nestjs/common';
+import { and, desc, eq, gt, lte, sql } from 'drizzle-orm';
 import { v4 as uuidv4 } from 'uuid';
-import { Lecture } from './lecture.entity';
-import { Section } from './section.entity';
-import { LectureResource } from './lecture-resource.entity';
+import { DrizzleService } from '../database/drizzle.service';
+import { lectureResources, lectures, sections } from '../database/schema';
 import { CoursesService } from '../courses/courses.service';
+import { EventsGateway } from '../gateway/events.gateway';
+import { fail, ok, ServiceResult } from '../common/types/service-result';
+import { formatDbTimestamp, getCurrentTimeInDBFormat, parseDbTime } from '../common/time';
 import { CreateLectureDto } from './dto/create-lecture.dto';
 import { UpdateLectureDto } from './dto/update-lecture.dto';
+import { LectureResourceInputDto } from './dto/lecture-resource.dto';
 
-function getCurrentTimeInDBFormat(): string {
-  return new Date().toISOString().replace('T', ' ').replace('Z', '');
-}
+type ResourceRow = { title: string; url: string };
 
 @Injectable()
 export class LecturesService {
   constructor(
-    @InjectRepository(Lecture)
-    private readonly lectureRepository: Repository<Lecture>,
-    @InjectRepository(Section)
-    private readonly sectionRepository: Repository<Section>,
-    @InjectRepository(LectureResource)
-    private readonly resourceRepository: Repository<LectureResource>,
-    private readonly dataSource: DataSource,
+    private readonly drizzle: DrizzleService,
     private readonly coursesService: CoursesService,
+    private readonly events: EventsGateway,
   ) {}
 
-  async getLecturesForCourse(courseId: string, userId: string, lastFetched?: string) {
-    const course = await this.dataSource.query('SELECT id FROM courses WHERE id = ?', [courseId]);
-    if (!course.length) throw new NotFoundException('Course not found');
+  private get db() {
+    return this.drizzle.db;
+  }
 
-    const isEnrolled = await this.coursesService.isUserEnrolledInCourse(userId, courseId);
-    const isAdmin = await this.coursesService.isCourseAdmin(userId, courseId);
-    if (!isEnrolled && !isAdmin) throw new ForbiddenException('User is not enrolled in this course');
+  private normalizeTags(tags?: string[] | string | null): string[] {
+    if (!tags) {
+      return [];
+    }
+    if (Array.isArray(tags)) {
+      return tags;
+    }
+    return tags
+      .split(',')
+      .map((tag) => tag.trim())
+      .filter(Boolean);
+  }
 
-    const sections = await this.dataSource.query(
-      'SELECT id, title, description FROM sections WHERE courseId = ?',
-      [courseId],
+  private async getResources(lectureId: string, type: string): Promise<ResourceRow[]> {
+    return this.db
+      .select({ title: lectureResources.title, url: lectureResources.url })
+      .from(lectureResources)
+      .where(and(eq(lectureResources.lectureId, lectureId), eq(lectureResources.type, type)))
+      .orderBy(lectureResources.createdAt);
+  }
+
+  private async insertResources(
+    lectureId: string,
+    items: LectureResourceInputDto[] | undefined,
+    type: string,
+    executor: { insert: typeof this.db.insert } = this.db,
+  ) {
+    if (!items?.length) {
+      return;
+    }
+    await executor.insert(lectureResources).values(
+      items.map((item) => ({
+        id: uuidv4(),
+        title: item.title,
+        url: item.url,
+        type,
+        lectureId,
+      })),
     );
+  }
 
-    const lectureFields = 'id, title, description, tags, sectionId';
-    const result: any[] = [];
-    for (const section of sections) {
-      const params = [section.id, ...(lastFetched ? [lastFetched] : [])];
-      const sectionLectures = await this.dataSource.query(
-        `SELECT ${lectureFields} FROM lectures WHERE sectionId = ? ${lastFetched ? 'AND createdAt > ?' : ''} ORDER BY createdAt`,
-        params,
+  async getLecturesForCourse(
+    courseId: string,
+    userId: string,
+    lastFetched?: string,
+  ): Promise<ServiceResult<{ sections: unknown[]; lastFetched: string }>> {
+    const course = await this.coursesService.findById(courseId);
+    if (!course) {
+      return fail('not_found', 'Course not found');
+    }
+    if (!(await this.coursesService.canAccessCourse(userId, courseId))) {
+      return fail('forbidden', 'User is not enrolled in this course');
+    }
+
+    const courseSections = await this.db
+      .select({
+        id: sections.id,
+        title: sections.title,
+        description: sections.description,
+      })
+      .from(sections)
+      .where(eq(sections.courseId, courseId));
+
+    const result = [];
+    for (const section of courseSections) {
+      const filters = [eq(lectures.sectionId, section.id)];
+      if (lastFetched) {
+        filters.push(gt(lectures.createdAt, parseDbTime(lastFetched)));
+      }
+      const sectionLectures = await this.db
+        .select({
+          id: lectures.id,
+          title: lectures.title,
+          description: lectures.description,
+          tags: lectures.tags,
+          sectionId: lectures.sectionId,
+        })
+        .from(lectures)
+        .where(and(...filters))
+        .orderBy(lectures.createdAt);
+      if (sectionLectures.length > 0) {
+        result.push({
+          ...section,
+          lectures: sectionLectures.map((lecture) => ({ ...lecture, courseId })),
+        });
+      }
+    }
+    return ok({ sections: result, lastFetched: getCurrentTimeInDBFormat() });
+  }
+
+  async getLecture(
+    courseId: string,
+    lectureId: string,
+    userId: string,
+    updatedAt?: string,
+  ): Promise<ServiceResult<{ lectureData: unknown }>> {
+    const course = await this.coursesService.findById(courseId);
+    if (!course) {
+      return fail('not_found', 'Course not found');
+    }
+    if (!(await this.coursesService.canAccessCourse(userId, courseId))) {
+      return fail('forbidden', 'User is not enrolled in this course');
+    }
+
+    const [lecture] = await this.db
+      .select({
+        id: lectures.id,
+        updatedAt: lectures.updatedAt,
+        title: lectures.title,
+        videoLink: lectures.videoLink,
+        notes: lectures.notes,
+        audioLink: lectures.audioLink,
+        slides: lectures.slides,
+        subtitles: lectures.subtitles,
+        transcript: lectures.transcript,
+        description: lectures.description,
+        tags: lectures.tags,
+      })
+      .from(lectures)
+      .where(eq(lectures.id, lectureId))
+      .limit(1);
+    if (!lecture) {
+      return fail('not_found', 'Lecture not found');
+    }
+    if (updatedAt && formatDbTimestamp(lecture.updatedAt) === updatedAt) {
+      return fail('not_modified', 'Lecture not updated');
+    }
+
+    return ok({
+      lectureData: {
+        ...lecture,
+        updatedAt: formatDbTimestamp(lecture.updatedAt),
+        tags: this.normalizeTags(lecture.tags),
+        demos: await this.getResources(lectureId, 'demo'),
+        shorts: await this.getResources(lectureId, 'short'),
+        quizzez: await this.getResources(lectureId, 'quiz'),
+      },
+    });
+  }
+
+  async getSectionsTitles(courseId: string): Promise<ServiceResult<string[]>> {
+    const titles = await this.db
+      .select({ title: sections.title })
+      .from(sections)
+      .where(eq(sections.courseId, courseId));
+    return ok(titles.map((row) => row.title));
+  }
+
+  async createLecture(
+    courseId: string,
+    userId: string,
+    dto: CreateLectureDto,
+  ): Promise<ServiceResult<Record<string, unknown>>> {
+    const title = dto.name ?? dto.title;
+    const description = dto.description;
+    const sectionTitle = dto.section;
+    if (!title || !description || !sectionTitle) {
+      return fail('validation_error', 'Missing required fields');
+    }
+
+    const course = await this.coursesService.findById(courseId);
+    if (!course) {
+      return fail('not_found', 'Course not found');
+    }
+    if (!(await this.coursesService.isCourseAdmin(userId, courseId))) {
+      return fail('forbidden', 'User is not a course admin');
+    }
+
+    const tags = this.normalizeTags(dto.tags);
+    const youtubeLink = dto.youtubeLink ?? dto.videoLink ?? '';
+    const notesLink = dto.notesLink ?? dto.notes ?? '';
+    const slidesLink = dto.slidesLink ?? dto.slides ?? '';
+    const demos = dto.demos ?? [];
+    const shorts = dto.extras ?? [];
+
+    const created = await this.db.transaction(async (tx) => {
+      const [existingSection] = await tx
+        .select({ id: sections.id })
+        .from(sections)
+        .where(eq(sections.title, sectionTitle))
+        .limit(1);
+
+      let sectionId = existingSection?.id;
+      let newSection = false;
+      if (!sectionId) {
+        newSection = true;
+        sectionId = uuidv4();
+        await tx.insert(sections).values({
+          id: sectionId,
+          title: sectionTitle,
+          courseId,
+        });
+      }
+
+      const lectureId = uuidv4();
+      await tx.insert(lectures).values({
+        id: lectureId,
+        title,
+        description,
+        tags: tags.join(','),
+        videoLink: youtubeLink,
+        notes: notesLink,
+        slides: slidesLink,
+        userId,
+        courseId,
+        sectionId,
+      });
+      await this.insertResources(lectureId, demos, 'demo', tx);
+      await this.insertResources(lectureId, shorts, 'short', tx);
+
+      return { lectureId, sectionId, newSection };
+    });
+
+    const newLecture = {
+      id: created.lectureId,
+      title,
+      description,
+      section: sectionTitle,
+      notes: notesLink,
+      slides: slidesLink,
+      videoLink: youtubeLink,
+      audioLink: '',
+      subtitles: '',
+      transcript: '',
+      tags,
+      demos,
+      shorts,
+      quizzez: [],
+    };
+
+    const lastFetched = getCurrentTimeInDBFormat();
+    const room = `sections-${courseId}`;
+    if (!created.newSection) {
+      this.events.emitToRoom(
+        room,
+        'lectureCreated',
+        {
+          payload: {
+            sectionId: created.sectionId,
+            lecture: { id: created.lectureId, title, description, tags },
+            lastFetched,
+          },
+          userId,
+        },
+        userId,
       );
-      const lecturesWithCourseId = sectionLectures.map((l: any) => ({ ...l, courseId }));
-      if (lecturesWithCourseId.length > 0) {
-        result.push({ ...section, lectures: lecturesWithCourseId });
-      }
-    }
-
-    return { sections: result, lastFetched: getCurrentTimeInDBFormat() };
-  }
-
-  async getLecture(courseId: string, lectureId: string, userId: string, updatedAt?: string) {
-    const course = await this.dataSource.query('SELECT id FROM courses WHERE id = ?', [courseId]);
-    if (!course.length) throw new NotFoundException('Course not found');
-
-    const isEnrolled = await this.coursesService.isUserEnrolledInCourse(userId, courseId);
-    const isAdmin = await this.coursesService.isCourseAdmin(userId, courseId);
-    if (!isEnrolled && !isAdmin) throw new ForbiddenException('Not authorized');
-
-    const [lecture] = await this.dataSource.query(
-      'SELECT * FROM lectures WHERE id = ? AND courseId = ?',
-      [lectureId, courseId],
-    );
-    if (!lecture) throw new NotFoundException('Lecture not found');
-
-    if (updatedAt && lecture.updatedAt <= new Date(updatedAt)) {
-      return { lectureData: null, upToDate: true };
-    }
-
-    const resources = await this.resourceRepository.find({ where: { lectureId } });
-    return { lectureData: { ...lecture, resources } };
-  }
-
-  async getSectionsTitles(courseId: string, userId: string) {
-    const isEnrolled = await this.coursesService.isUserEnrolledInCourse(userId, courseId);
-    const isAdmin = await this.coursesService.isCourseAdmin(userId, courseId);
-    if (!isEnrolled && !isAdmin) throw new ForbiddenException('Not authorized');
-
-    const sections = await this.dataSource.query(
-      'SELECT id, title FROM sections WHERE courseId = ? ORDER BY createdAt',
-      [courseId],
-    );
-    return sections;
-  }
-
-  async createLecture(courseId: string, userId: string, dto: CreateLectureDto) {
-    const isAdmin = await this.coursesService.isCourseAdmin(userId, courseId);
-    if (!isAdmin) throw new ForbiddenException('User is not a course admin');
-
-    const id = uuidv4();
-    await this.dataSource.query(
-      `INSERT INTO lectures (id, title, description, tags, videoLink, notes, audioLink, slides, subtitles, transcript, userId, courseId, sectionId)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [id, dto.title, dto.description, dto.tags || null, dto.videoLink, dto.notes, dto.audioLink || null, dto.slides || null, dto.subtitles || null, dto.transcript || null, userId, courseId, dto.sectionId],
-    );
-
-    if (dto.resources && dto.resources.length > 0) {
-      for (const resource of dto.resources) {
-        await this.dataSource.query(
-          'INSERT INTO lectureResources (id, title, url, type, lectureId) VALUES (?, ?, ?, ?, ?)',
-          [uuidv4(), resource.title, resource.url, resource.type, id],
-        );
-      }
-    }
-
-    const [lecture] = await this.dataSource.query('SELECT * FROM lectures WHERE id = ?', [id]);
-    const resources = await this.resourceRepository.find({ where: { lectureId: id } });
-    const [section] = await this.dataSource.query('SELECT * FROM sections WHERE id = ?', [dto.sectionId]);
-
-    return { lecture: { ...lecture, resources }, section };
-  }
-
-  async updateLecture(lectureId: string, userId: string, dto: UpdateLectureDto) {
-    const [lecture] = await this.dataSource.query('SELECT * FROM lectures WHERE id = ?', [lectureId]);
-    if (!lecture) throw new NotFoundException('Lecture not found');
-
-    const isAdmin = await this.coursesService.isCourseAdmin(userId, lecture.courseId);
-    if (!isAdmin) throw new ForbiddenException('User is not a course admin');
-
-    const updateFields: string[] = [];
-    const updateValues: any[] = [];
-
-    const fields = ['title', 'description', 'tags', 'videoLink', 'notes', 'audioLink', 'slides', 'subtitles', 'transcript'];
-    for (const field of fields) {
-      if ((dto as any)[field] !== undefined) {
-        updateFields.push(`${field} = ?`);
-        updateValues.push((dto as any)[field]);
-      }
-    }
-
-    if (updateFields.length > 0) {
-      await this.dataSource.query(
-        `UPDATE lectures SET ${updateFields.join(', ')} WHERE id = ?`,
-        [...updateValues, lectureId],
+    } else {
+      const [section] = await this.db
+        .select({
+          id: sections.id,
+          title: sections.title,
+          description: sections.description,
+        })
+        .from(sections)
+        .where(eq(sections.id, created.sectionId))
+        .limit(1);
+      this.events.emitToRoom(
+        room,
+        'sectionCreated',
+        {
+          payload: {
+            newSection: {
+              ...section,
+              lectures: [{ id: created.lectureId, title, description, tags }],
+            },
+            lastFetched,
+          },
+          userId,
+        },
+        userId,
       );
     }
 
-    if (dto.resources !== undefined) {
-      await this.dataSource.query('DELETE FROM lectureResources WHERE lectureId = ?', [lectureId]);
-      for (const resource of dto.resources) {
-        await this.dataSource.query(
-          'INSERT INTO lectureResources (id, title, url, type, lectureId) VALUES (?, ?, ?, ?, ?)',
-          [uuidv4(), resource.title, resource.url, resource.type, lectureId],
-        );
-      }
+    return ok(newLecture);
+  }
+
+  async updateLecture(
+    lectureId: string,
+    userId: string,
+    dto: UpdateLectureDto,
+  ): Promise<ServiceResult<Record<string, unknown>>> {
+    const [lecture] = await this.db.select().from(lectures).where(eq(lectures.id, lectureId)).limit(1);
+    if (!lecture) {
+      return fail('not_found', 'Lecture not found');
+    }
+    if (!(await this.coursesService.isCourseAdmin(userId, lecture.courseId))) {
+      return fail('forbidden', "User don't have previlate to delete this lecture");
     }
 
-    const [updated] = await this.dataSource.query('SELECT * FROM lectures WHERE id = ?', [lectureId]);
-    const resources = await this.resourceRepository.find({ where: { lectureId } });
-    return { ...updated, resources };
-  }
+    const title = dto.name ?? dto.title ?? lecture.title;
+    const description = dto.description ?? lecture.description;
+    const youtubeLink = dto.youtubeLink ?? dto.videoLink ?? lecture.videoLink;
+    const notesLink = dto.notesLink ?? dto.notes ?? lecture.notes;
+    const slidesLink = dto.slidesLink ?? dto.slides ?? lecture.slides ?? '';
+    const tags = dto.tags !== undefined ? this.normalizeTags(dto.tags) : this.normalizeTags(lecture.tags);
+    const demos = dto.demos ?? [];
+    const shorts = dto.extras ?? [];
+    const sectionTitle = dto.section;
 
-  async deleteLecture(lectureId: string, userId: string) {
-    const [lecture] = await this.dataSource.query('SELECT * FROM lectures WHERE id = ?', [lectureId]);
-    if (!lecture) throw new NotFoundException('Lecture not found');
+    const updated = await this.db.transaction(async (tx) => {
+      let sectionId = lecture.sectionId;
+      if (sectionTitle) {
+        const [existingSection] = await tx
+          .select({ id: sections.id })
+          .from(sections)
+          .where(eq(sections.title, sectionTitle))
+          .limit(1);
+        if (existingSection) {
+          sectionId = existingSection.id;
+        } else {
+          sectionId = uuidv4();
+          await tx.insert(sections).values({
+            id: sectionId,
+            title: sectionTitle,
+            courseId: lecture.courseId,
+          });
+        }
+      }
 
-    const isAdmin = await this.coursesService.isCourseAdmin(userId, lecture.courseId);
-    if (!isAdmin) throw new ForbiddenException('User is not a course admin');
+      await tx
+        .update(lectures)
+        .set({
+          title,
+          description,
+          videoLink: youtubeLink,
+          notes: notesLink,
+          slides: slidesLink,
+          sectionId,
+          tags: tags.join(','),
+        })
+        .where(eq(lectures.id, lectureId));
 
-    await this.dataSource.query('DELETE FROM lectures WHERE id = ?', [lectureId]);
-    return { message: 'Lecture deleted successfully', courseId: lecture.courseId, sectionId: lecture.sectionId };
-  }
+      await tx.delete(lectureResources).where(eq(lectureResources.lectureId, lectureId));
+      await this.insertResources(lectureId, demos, 'demo', tx);
+      await this.insertResources(lectureId, shorts, 'short', tx);
 
-  async searchLectures(courseId: string, query: string) {
-    const results = await this.dataSource.query(
-      `SELECT id, title, description, tags, sectionId, courseId FROM lectures
-       WHERE courseId = ? AND MATCH(title, description, tags) AGAINST(? IN BOOLEAN MODE)`,
-      [courseId, query],
+      const [row] = await tx
+        .select({
+          id: lectures.id,
+          title: lectures.title,
+          description: lectures.description,
+          notes: lectures.notes,
+          videoLink: lectures.videoLink,
+          slides: lectures.slides,
+          subtitles: lectures.subtitles,
+          transcript: lectures.transcript,
+          audioLink: lectures.audioLink,
+          sectionId: lectures.sectionId,
+        })
+        .from(lectures)
+        .where(eq(lectures.id, lectureId))
+        .limit(1);
+      return row;
+    });
+
+    const response = {
+      ...updated,
+      tags,
+      demos,
+      shorts,
+      quizzez: [],
+    };
+    this.events.emitToRoom(
+      [`sections-${lecture.courseId}`, `lecture-${lectureId}`],
+      'lectureUpdated',
+      { payload: { updatedLecture: response }, userId },
+      userId,
     );
-    return { results, total: results.length, query };
+    return ok(response);
+  }
+
+  async deleteLecture(
+    lectureId: string,
+    userId: string,
+  ): Promise<ServiceResult<{ message: string }>> {
+    const [lecture] = await this.db.select().from(lectures).where(eq(lectures.id, lectureId)).limit(1);
+    if (!lecture) {
+      return fail('not_found', 'Lecture not found');
+    }
+    if (!(await this.coursesService.isCourseAdmin(userId, lecture.courseId))) {
+      return fail('forbidden', 'User is not a course admin');
+    }
+
+    const sectionId = await this.db.transaction(async (tx) => {
+      const currentSectionId = lecture.sectionId;
+      await tx.delete(lectures).where(eq(lectures.id, lectureId));
+      const remaining = await tx
+        .select({ id: lectures.id })
+        .from(lectures)
+        .where(eq(lectures.sectionId, currentSectionId));
+      if (remaining.length === 0) {
+        await tx.delete(sections).where(eq(sections.id, currentSectionId));
+      }
+      return currentSectionId;
+    });
+
+    this.events.emitToRoom(
+      [`sections-${lecture.courseId}`, `lecture-${lectureId}`],
+      'lectureDeleted',
+      { payload: { lectureId, sectionId }, userId },
+      userId,
+    );
+    return ok({ message: 'Lecture deleted successfully' });
+  }
+
+  async diffSync(
+    courseId: string,
+    body: { entries?: Record<string, string[]>; lastSynced?: string },
+  ): Promise<ServiceResult<{ entries: unknown; lastSynced: string }>> {
+    const course = await this.coursesService.findById(courseId);
+    if (!course) {
+      return fail('not_found', 'Course not found');
+    }
+    const { entries, lastSynced } = body;
+    if (typeof entries !== 'object' || entries === null || lastSynced == null) {
+      return fail('validation_error', 'Missing or invalid entries');
+    }
+
+    const parsedLastSynced = parseDbTime(lastSynced);
+    const result: {
+      updated: Record<string, unknown[]>;
+      deleted: { sections: string[]; lectures: Record<string, string[]> };
+    } = {
+      updated: {},
+      deleted: { sections: [], lectures: {} },
+    };
+
+    const dbSections = await this.db
+      .select({ id: sections.id })
+      .from(sections)
+      .where(and(eq(sections.courseId, courseId), lte(sections.createdAt, parsedLastSynced)));
+    const dbSectionIds = dbSections.map((row) => row.id);
+
+    for (const section of dbSectionIds) {
+      const sectionLectures = await this.db
+        .select({
+          id: lectures.id,
+          title: lectures.title,
+          description: lectures.description,
+          tags: lectures.tags,
+          sectionId: lectures.sectionId,
+          updatedAt: lectures.updatedAt,
+        })
+        .from(lectures)
+        .where(and(eq(lectures.sectionId, section), lte(lectures.createdAt, parsedLastSynced)));
+
+      for (const lecture of sectionLectures) {
+        if (lecture.updatedAt >= parsedLastSynced) {
+          if (!result.updated[section]) {
+            result.updated[section] = [];
+          }
+          result.updated[section].push({
+            id: lecture.id,
+            title: lecture.title,
+            description: lecture.description,
+            tags: lecture.tags,
+            sectionId: lecture.sectionId,
+            courseId,
+          });
+        }
+      }
+
+      const existingIds = sectionLectures.map((lecture) => lecture.id);
+      result.deleted.lectures[section] = (entries[section] ?? []).filter(
+        (lectureId) => !existingIds.includes(lectureId),
+      );
+    }
+
+    result.deleted.sections = Object.keys(entries).filter((sectionId) => !dbSectionIds.includes(sectionId));
+    return ok({ entries: result, lastSynced: getCurrentTimeInDBFormat() });
+  }
+
+  async searchLectures(
+    courseId: string,
+    query: string,
+  ): Promise<ServiceResult<{ results: unknown[]; total: number; query: string; context: { courseId: string } }>> {
+    if (!courseId || !query) {
+      return fail('validation_error', 'Invalid search parameters. Expecting (courseId & query)');
+    }
+    const decodedQuery = decodeURIComponent(query);
+    const course = await this.coursesService.findById(courseId);
+    if (!course) {
+      return fail('not_found', 'Course not found');
+    }
+
+    const tsQuery = sql`plainto_tsquery('simple', ${decodedQuery})`;
+    const rows = await this.db
+      .select({
+        id: lectures.id,
+        title: lectures.title,
+        description: lectures.description,
+        tags: lectures.tags,
+        createdAt: lectures.createdAt,
+        sectionId: lectures.sectionId,
+        courseId: lectures.courseId,
+        relevance: sql<number>`ts_rank(${lectures.searchVector}, ${tsQuery})`,
+      })
+      .from(lectures)
+      .where(
+        and(
+          eq(lectures.courseId, courseId),
+          sql`${lectures.searchVector} @@ ${tsQuery}`,
+          sql`ts_rank(${lectures.searchVector}, ${tsQuery}) > 0.25`,
+        ),
+      )
+      .orderBy(desc(sql`ts_rank(${lectures.searchVector}, ${tsQuery})`));
+
+    const results = rows.map((lecture) => ({
+      ...lecture,
+      createdAt: formatDbTimestamp(lecture.createdAt),
+      tags: this.normalizeTags(lecture.tags),
+    }));
+    return ok({
+      results,
+      total: results.length,
+      query: decodedQuery,
+      context: { courseId },
+    });
   }
 }

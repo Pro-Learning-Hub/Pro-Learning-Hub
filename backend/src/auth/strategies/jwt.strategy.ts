@@ -1,6 +1,17 @@
-import { Injectable, UnauthorizedException, InternalServerErrorException } from '@nestjs/common';
+import { Injectable, InternalServerErrorException, UnauthorizedException } from '@nestjs/common';
 import { PassportStrategy } from '@nestjs/passport';
 import { ExtractJwt, Strategy } from 'passport-jwt';
+import { Request } from 'express';
+import { ACCESS_TOKEN_COOKIE } from '../cookie';
+import { RequestUser } from '../../common/decorators/current-user.decorator';
+
+function cookieOrBearer(req: Request): string | null {
+  const cookieToken = req?.cookies?.[ACCESS_TOKEN_COOKIE];
+  if (cookieToken) {
+    return cookieToken;
+  }
+  return ExtractJwt.fromAuthHeaderAsBearerToken()(req);
+}
 
 @Injectable()
 export class JwtStrategy extends PassportStrategy(Strategy) {
@@ -10,16 +21,20 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
       throw new InternalServerErrorException('TOKEN_SECRET_KEY environment variable is not set');
     }
     super({
-      jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(),
+      jwtFromRequest: cookieOrBearer,
       ignoreExpiration: false,
       secretOrKey: secret,
     });
   }
 
-  async validate(payload: any) {
+  async validate(payload: { userId?: string; courseId?: string; role?: string }): Promise<RequestUser> {
     if (!payload.userId) {
       throw new UnauthorizedException();
     }
-    return { userId: payload.userId, courseId: payload.courseId, role: payload.role };
+    return {
+      userId: payload.userId,
+      courseId: payload.courseId,
+      role: payload.role ?? 'student',
+    };
   }
 }

@@ -1,39 +1,37 @@
 import { Injectable } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
-import { User } from './user.entity';
+import { eq } from 'drizzle-orm';
+import { DrizzleService } from '../database/drizzle.service';
+import { users } from '../database/schema';
+
+export type PublicUser = {
+  id: string;
+  name: string;
+  pictureThumbnail: string | null;
+};
 
 @Injectable()
 export class UsersService {
-  constructor(
-    @InjectRepository(User)
-    private readonly usersRepository: Repository<User>,
-  ) {}
+  constructor(private readonly drizzle: DrizzleService) {}
 
-  async findById(id: string): Promise<User | null> {
-    return this.usersRepository.findOne({ where: { id } });
+  private get db() {
+    return this.drizzle.db;
   }
 
-  async findByEmail(email: string): Promise<User | null> {
-    return this.usersRepository.findOne({ where: { email } });
+  async findById(id: string) {
+    const [user] = await this.db.select().from(users).where(eq(users.id, id)).limit(1);
+    return user ?? null;
   }
 
-  async findByGoogleId(googleId: string): Promise<User | null> {
-    return this.usersRepository.findOne({ where: { googleId } });
+  async findByEmail(email: string) {
+    const [user] = await this.db.select().from(users).where(eq(users.email, email)).limit(1);
+    return user ?? null;
   }
 
-  async create(userData: Partial<User>): Promise<User> {
-    const user = this.usersRepository.create(userData);
-    return this.usersRepository.save(user);
-  }
-
-  async update(id: string, userData: Partial<User>): Promise<void> {
-    await this.usersRepository.update(id, userData);
-  }
-
-  async getUserPublicData(userId: string) {
+  async getUserPublicData(userId: string): Promise<PublicUser | null> {
     const user = await this.findById(userId);
-    if (!user) return null;
+    if (!user) {
+      return null;
+    }
     return {
       id: user.id,
       name: `${user.firstName} ${user.lastName}`,

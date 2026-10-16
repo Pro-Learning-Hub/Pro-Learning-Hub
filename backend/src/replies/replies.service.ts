@@ -1,160 +1,400 @@
-import { Injectable, NotFoundException, ForbiddenException } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, DataSource } from 'typeorm';
+import { Injectable } from '@nestjs/common';
+import { and, desc, eq, lte, sql } from 'drizzle-orm';
 import { v4 as uuidv4 } from 'uuid';
-import { Reply } from './reply.entity';
+import { DrizzleService } from '../database/drizzle.service';
+import { lectures, questions, replies, votes } from '../database/schema';
 import { UsersService } from '../users/users.service';
 import { CoursesService } from '../courses/courses.service';
+import { EventsGateway } from '../gateway/events.gateway';
+import { fail, ok, ServiceResult } from '../common/types/service-result';
+import { formatDbTimestamp, getCurrentTimeInDBFormat, parseDbTime, withFormattedTimestamps } from '../common/time';
 import { CreateReplyDto } from './dto/create-reply.dto';
 import { UpdateReplyDto } from './dto/update-reply.dto';
-
-function getCurrentTimeInDBFormat(): string {
-  return new Date().toISOString().replace('T', ' ').replace('Z', '');
-}
 
 @Injectable()
 export class RepliesService {
   constructor(
-    @InjectRepository(Reply)
-    private readonly replyRepository: Repository<Reply>,
-    private readonly dataSource: DataSource,
+    private readonly drizzle: DrizzleService,
     private readonly usersService: UsersService,
     private readonly coursesService: CoursesService,
+    private readonly events: EventsGateway,
   ) {}
 
-  async getUpvoteStatus(userId: string, replyId: string): Promise<boolean> {
-    const result = await this.dataSource.query(
-      'SELECT userId FROM votes WHERE userId = ? AND replyId = ?',
-      [userId, replyId],
-    );
-    return result.length > 0;
+  private get db() {
+    return this.drizzle.db;
   }
 
-  async getReplies(questionId: string, userId: string, lastFetched?: string) {
-    const [question] = await this.dataSource.query(
-      `SELECT id, title, body, updatedAt, upvotes, repliesCount, userId, lectureId,
-       ${lastFetched ? '(updatedAt >= ?)' : '1'} AS isNew FROM questions WHERE id = ?`,
-      lastFetched ? [lastFetched, questionId] : [questionId],
-    );
+  async getUpvoteStatus(userId: string, replyId: string): Promise<boolean> {
+    const rows = await this.db
+      .select({ userId: votes.userId })
+      .from(votes)
+      .where(and(eq(votes.userId, userId), eq(votes.replyId, replyId)))
+      .limit(1);
+    return rows.length > 0;
+  }
 
-    if (!question) throw new NotFoundException('Question not found');
+  private async getReplyCourseId(replyId: string): Promise<string | null> {
+    const [row] = await this.db
+      .select({
+        courseIdFromQuestion: questions.courseId,
+        lectureId: questions.lectureId,
+      })
+      .from(replies)
+      .innerJoin(questions, eq(replies.questionId, questions.id))
+      .where(eq(replies.id, replyId))
+      .limit(1);
+    if (!row) {
+      return null;
+    }
+    if (row.courseIdFromQuestion) {
+      return row.courseIdFromQuestion;
+    }
+    if (!row.lectureId) {
+      return null;
+    }
+    const [lecture] = await this.db
+      .select({ courseId: lectures.courseId })
+      .from(lectures)
+      .where(eq(lectures.id, row.lectureId))
+      .limit(1);
+    return lecture?.courseId ?? null;
+  }
 
-    const upvoted = await this.dataSource.query(
-      'SELECT userId FROM votes WHERE userId = ? AND questionId = ?',
-      [userId, questionId],
-    );
-    question.upvoted = upvoted.length > 0;
+  private async getQuestionParentId(questionId: string) {
+    const [result] = await this.db
+      .select({
+        courseId: questions.courseId,
+        lectureId: questions.lectureId,
+      })
+      .from(questions)
+      .where(eq(questions.id, questionId))
+      .limit(1);
+    return result ?? null;
+  }
 
-    let questionResponse: any;
-    if (!question.isNew) {
+  async getReplies(
+    questionId: string,
+    userId: string,
+    lastFetched?: string,
+  ): Promise<ServiceResult<{ question: unknown; repliesList: unknown[]; lastFetched: string }>> {
+    const [question] = await this.db
+      .select({
+        id: questions.id,
+        title: questions.title,
+        body: questions.body,
+        updatedAt: questions.updatedAt,
+        upvotes: questions.upvotes,
+        repliesCount: questions.repliesCount,
+        userId: questions.userId,
+        lectureId: questions.lectureId,
+      })
+      .from(questions)
+      .where(eq(questions.id, questionId))
+      .limit(1);
+    if (!question) {
+      return fail('not_found', 'Question not found');
+    }
+
+    const isNew = lastFetched
+      ? question.updatedAt >= parseDbTime(lastFetched)
+      : true;
+    const questionUpvoted = await this.db
+      .select({ userId: votes.userId })
+      .from(votes)
+      .where(and(eq(votes.userId, userId), eq(votes.questionId, questionId)))
+      .limit(1);
+
+    let questionResponse: Record<string, unknown>;
+    if (!isNew) {
       questionResponse = {
         id: question.id,
         repliesCount: question.repliesCount,
-        upvoted: question.upvoted,
+        upvoted: questionUpvoted.length > 0,
         upvotes: question.upvotes,
-        updatedAt: question.updatedAt,
+        updatedAt: formatDbTimestamp(question.updatedAt),
       };
     } else {
-      question.user = await this.usersService.getUserPublicData(question.userId);
-      delete question.userId;
-      delete question.isNew;
-      questionResponse = question;
+      const { userId: _userId, ...rest } = question;
+      questionResponse = {
+        ...rest,
+        updatedAt: formatDbTimestamp(question.updatedAt),
+        upvoted: questionUpvoted.length > 0,
+        user: await this.usersService.getUserPublicData(question.userId),
+      };
     }
 
-    const params = [questionId, ...(lastFetched ? [lastFetched] : [])];
-    const replies = await this.dataSource.query(
-      `SELECT id, body, userId, updatedAt, upvotes FROM replies
-       WHERE questionId = ? ${lastFetched ? 'AND createdAt > ?' : ''} ORDER BY upvotes DESC`,
-      params,
-    );
+    const filters = [eq(replies.questionId, questionId)];
+    if (lastFetched) {
+      filters.push(sql`${replies.createdAt} > ${parseDbTime(lastFetched)}`);
+    }
+    const replyRows = await this.db
+      .select({
+        id: replies.id,
+        body: replies.body,
+        userId: replies.userId,
+        updatedAt: replies.updatedAt,
+        upvotes: replies.upvotes,
+      })
+      .from(replies)
+      .where(and(...filters))
+      .orderBy(desc(replies.upvotes));
 
-    const repliesList: any[] = [];
-    for (const reply of replies) {
+    const repliesList = [];
+    for (const reply of replyRows) {
       const user = await this.usersService.getUserPublicData(reply.userId);
-      const replyUpvoted = await this.getUpvoteStatus(userId, reply.id);
-      repliesList.push({ ...reply, user, upvoted: replyUpvoted });
+      const upvoted = await this.getUpvoteStatus(userId, reply.id);
+      repliesList.push({
+        ...reply,
+        updatedAt: formatDbTimestamp(reply.updatedAt),
+        user,
+        upvoted,
+      });
     }
 
-    return { question: questionResponse, repliesList, lastFetched: getCurrentTimeInDBFormat() };
+    return ok({
+      question: questionResponse,
+      repliesList,
+      lastFetched: getCurrentTimeInDBFormat(),
+    });
   }
 
-  async createReply(questionId: string, userId: string, dto: CreateReplyDto) {
-    const [question] = await this.dataSource.query('SELECT id FROM questions WHERE id = ?', [questionId]);
-    if (!question) throw new NotFoundException('Question not found');
+  async voteReply(
+    replyId: string,
+    userId: string,
+    action: 'upvote' | 'downvote',
+  ): Promise<ServiceResult<{ message: string }>> {
+    if (!action) {
+      return fail('validation_error', 'Missing required fields');
+    }
+    const [reply] = await this.db
+      .select({ id: replies.id, questionId: replies.questionId })
+      .from(replies)
+      .where(eq(replies.id, replyId))
+      .limit(1);
+    if (!reply) {
+      return fail('not_found', 'Reply not found');
+    }
+
+    await this.db.transaction(async (tx) => {
+      if (action === 'upvote') {
+        await tx.insert(votes).values({ userId, replyId });
+      } else if (action === 'downvote') {
+        await tx.delete(votes).where(and(eq(votes.userId, userId), eq(votes.replyId, replyId)));
+      }
+      await tx
+        .update(replies)
+        .set({
+          upvotes: sql`${replies.upvotes} + ${action === 'upvote' ? 1 : -1}`,
+        })
+        .where(eq(replies.id, replyId));
+    });
+
+    this.events.emitToRoom(
+      `question-${reply.questionId}`,
+      'replyUpvoteToggled',
+      {
+        payload: {
+          replyId,
+          questionId: reply.questionId,
+          isUpvoted: action === 'upvote',
+        },
+        userId,
+      },
+      userId,
+    );
+    return ok({
+      message: action === 'upvote' ? 'Upvoted successfully' : 'Vote deleted successfully',
+    });
+  }
+
+  async createReply(
+    questionId: string,
+    userId: string,
+    dto: CreateReplyDto,
+  ): Promise<ServiceResult<{ newReply: unknown; lastFetched: string }>> {
+    if (!userId || !dto.body) {
+      return fail('validation_error', 'Missing required fields');
+    }
+    const [question] = await this.db
+      .select({ id: questions.id })
+      .from(questions)
+      .where(eq(questions.id, questionId))
+      .limit(1);
+    if (!question) {
+      return fail('not_found', 'Question not found');
+    }
 
     const id = uuidv4();
-    await this.dataSource.query(
-      'INSERT INTO replies (id, body, userId, questionId) VALUES (?, ?, ?, ?)',
-      [id, dto.body, userId, questionId],
-    );
-    await this.dataSource.query(
-      'UPDATE questions SET repliesCount = repliesCount + 1 WHERE id = ?',
-      [questionId],
-    );
+    await this.db.insert(replies).values({
+      id,
+      questionId,
+      userId,
+      body: dto.body,
+    });
+    const [newReply] = await this.db.select().from(replies).where(eq(replies.id, id)).limit(1);
+    const user = await this.usersService.getUserPublicData(newReply.userId);
+    const { userId: _userId, ...rest } = withFormattedTimestamps(newReply);
+    const response = { ...rest, user, upvoted: false };
+    const lastFetched = getCurrentTimeInDBFormat();
 
-    const user = await this.usersService.getUserPublicData(userId);
-    const [newReply] = await this.dataSource.query('SELECT * FROM replies WHERE id = ?', [id]);
-    return { ...newReply, user, upvoted: false, lastFetched: getCurrentTimeInDBFormat() };
+    this.events.emitToRoom(
+      `question-${questionId}`,
+      'replyCreated',
+      { payload: { newReply: response, lastFetched }, userId },
+      userId,
+    );
+    const parent = await this.getQuestionParentId(questionId);
+    if (parent) {
+      const room = parent.lectureId
+        ? `lectureDiscussion-${parent.lectureId}`
+        : `generalDiscussion-${parent.courseId}`;
+      this.events.emitToRoom(room, 'replyCreated', {
+        payload: { questionId, lectureId: parent.lectureId, courseId: parent.courseId },
+        userId,
+      });
+    }
+    return ok({ newReply: response, lastFetched });
   }
 
-  async voteReply(replyId: string, userId: string, action: 'upvote' | 'downvote') {
-    const [reply] = await this.dataSource.query('SELECT id, questionId FROM replies WHERE id = ?', [replyId]);
-    if (!reply) throw new NotFoundException('Reply not found');
-
-    if (action === 'upvote') {
-      await this.dataSource.query(
-        'INSERT IGNORE INTO votes (userId, replyId) VALUES (?, ?)',
-        [userId, replyId],
-      );
-    } else {
-      await this.dataSource.query(
-        'DELETE FROM votes WHERE userId = ? AND replyId = ?',
-        [userId, replyId],
-      );
+  async updateReply(
+    replyId: string,
+    userId: string,
+    dto: UpdateReplyDto,
+  ): Promise<ServiceResult<Record<string, unknown>>> {
+    if (!dto.body) {
+      return fail('validation_error', 'Missing required fields');
+    }
+    const [reply] = await this.db
+      .select({ id: replies.id, userId: replies.userId })
+      .from(replies)
+      .where(eq(replies.id, replyId))
+      .limit(1);
+    if (!reply) {
+      return fail('not_found', 'Reply not found');
+    }
+    if (reply.userId !== userId) {
+      return fail('forbidden', 'User is not authorized to edit this reply');
     }
 
-    await this.dataSource.query(
-      'UPDATE replies SET upvotes = (SELECT COUNT(*) FROM votes WHERE replyId = ?) WHERE id = ?',
-      [replyId, replyId],
+    await this.db.update(replies).set({ body: dto.body }).where(eq(replies.id, replyId));
+    const [updatedReply] = await this.db
+      .select({
+        id: replies.id,
+        questionId: replies.questionId,
+        body: replies.body,
+        updatedAt: replies.updatedAt,
+      })
+      .from(replies)
+      .where(eq(replies.id, replyId))
+      .limit(1);
+    const payload = {
+      ...updatedReply,
+      updatedAt: formatDbTimestamp(updatedReply.updatedAt),
+    };
+    this.events.emitToRoom(
+      `question-${updatedReply.questionId}`,
+      'replyUpdated',
+      { payload: { updatedReply: payload }, userId },
+      userId,
     );
-
-    const [updated] = await this.dataSource.query('SELECT upvotes FROM replies WHERE id = ?', [replyId]);
-    return { upvotes: updated.upvotes, upvoted: action === 'upvote', replyId, questionId: reply.questionId };
+    return ok(payload);
   }
 
-  async updateReply(replyId: string, userId: string, dto: UpdateReplyDto) {
-    const [reply] = await this.dataSource.query('SELECT * FROM replies WHERE id = ?', [replyId]);
-    if (!reply) throw new NotFoundException('Reply not found');
-    if (reply.userId !== userId) throw new ForbiddenException('Not authorized');
-
-    if (dto.body !== undefined) {
-      await this.dataSource.query('UPDATE replies SET body = ? WHERE id = ?', [dto.body, replyId]);
+  async deleteReply(
+    replyId: string,
+    userId: string,
+  ): Promise<ServiceResult<{ message: string }>> {
+    const [reply] = await this.db
+      .select({
+        id: replies.id,
+        userId: replies.userId,
+        questionId: replies.questionId,
+      })
+      .from(replies)
+      .where(eq(replies.id, replyId))
+      .limit(1);
+    if (!reply) {
+      return fail('not_found', 'Reply not found');
+    }
+    const replyCourseId = await this.getReplyCourseId(replyId);
+    const isAdmin = replyCourseId ? await this.coursesService.isCourseAdmin(userId, replyCourseId) : false;
+    if (reply.userId !== userId && !isAdmin) {
+      return fail('forbidden', 'User is not authorized to delete this reply');
     }
 
-    const [updated] = await this.dataSource.query('SELECT * FROM replies WHERE id = ?', [replyId]);
-    return updated;
+    await this.db.delete(replies).where(eq(replies.id, replyId));
+    this.events.emitToRoom(
+      `question-${reply.questionId}`,
+      'replyDeleted',
+      { payload: { replyId, questionId: reply.questionId }, userId },
+      userId,
+    );
+    const parent = await this.getQuestionParentId(reply.questionId);
+    if (parent) {
+      const room = parent.lectureId
+        ? `lectureDiscussion-${parent.lectureId}`
+        : `generalDiscussion-${parent.courseId}`;
+      this.events.emitToRoom(room, 'replyDeleted', {
+        payload: { questionId: reply.questionId, lectureId: parent.lectureId, courseId: parent.courseId },
+        userId,
+      });
+    }
+    return ok({ message: 'Reply deleted successfully' });
   }
 
-  async deleteReply(replyId: string, userId: string) {
-    const [reply] = await this.dataSource.query('SELECT * FROM replies WHERE id = ?', [replyId]);
-    if (!reply) throw new NotFoundException('Reply not found');
-    if (reply.userId !== userId) throw new ForbiddenException('Not authorized');
+  async diffSync(
+    questionId: string,
+    userId: string,
+    body: { entries?: Array<{ id: string; updatedAt: string }>; lastFetched?: string },
+  ): Promise<ServiceResult<{ results: unknown; lastSynced: string; questionId: string }>> {
+    const { entries = [], lastFetched } = body;
+    const entriesMap = new Map(entries.map((reply) => [reply.id, reply.updatedAt]));
+    const dbEntries = await this.db
+      .select({
+        id: replies.id,
+        updatedAt: replies.updatedAt,
+        body: replies.body,
+        upvotes: replies.upvotes,
+      })
+      .from(replies)
+      .where(
+        and(
+          eq(replies.questionId, questionId),
+          lastFetched ? lte(replies.createdAt, parseDbTime(lastFetched)) : sql`true`,
+        ),
+      );
 
-    await this.dataSource.query('DELETE FROM replies WHERE id = ?', [replyId]);
-    await this.dataSource.query(
-      'UPDATE questions SET repliesCount = GREATEST(repliesCount - 1, 0) WHERE id = ?',
-      [reply.questionId],
-    );
-    return { message: 'Reply deleted', replyId, questionId: reply.questionId };
-  }
+    const userVoteRows = await this.db
+      .select({ replyId: votes.replyId })
+      .from(votes)
+      .where(and(eq(votes.userId, userId), sql`${votes.replyId} IS NOT NULL`));
+    const userVotes = new Set(userVoteRows.map((row) => row.replyId));
 
-  async diffSync(questionId: string, userId: string, ids: string[]) {
-    const existing = await this.dataSource.query(
-      'SELECT id FROM replies WHERE questionId = ?',
-      [questionId],
-    );
-    const existingIds = existing.map((r: any) => r.id);
-    const deleted = ids.filter((id) => !existingIds.includes(id));
-    return { deleted };
+    const results: { existing: Record<string, unknown>; deleted: string[] } = {
+      existing: {},
+      deleted: [],
+    };
+    for (const entry of dbEntries) {
+      const updatedAt = formatDbTimestamp(entry.updatedAt);
+      const replyEntry: Record<string, unknown> = {
+        id: entry.id,
+        upvotes: entry.upvotes,
+      };
+      if (updatedAt !== entriesMap.get(entry.id)) {
+        replyEntry.body = entry.body;
+        replyEntry.updatedAt = updatedAt;
+      }
+      if (userVotes.has(entry.id)) {
+        replyEntry.upvoted = true;
+      }
+      results.existing[entry.id] = replyEntry;
+      entriesMap.delete(entry.id);
+    }
+    results.deleted = Array.from(entriesMap.keys());
+    return ok({
+      results,
+      lastSynced: getCurrentTimeInDBFormat(),
+      questionId,
+    });
   }
 }

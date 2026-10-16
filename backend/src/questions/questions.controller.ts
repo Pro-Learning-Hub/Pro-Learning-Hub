@@ -1,9 +1,6 @@
-import {
-  Controller, Get, Post, Put, Delete, Param, Body, Query,
-  UseGuards, HttpCode, HttpStatus,
-} from '@nestjs/common';
-import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
-import { CurrentUser } from '../common/decorators/current-user.decorator';
+import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Param, Post, Put, Query } from '@nestjs/common';
+import { CurrentUser, RequestUser } from '../common/decorators/current-user.decorator';
+import { unwrapResult } from '../common/http/map-service-result';
 import { QuestionsService } from './questions.service';
 import { CreateQuestionDto } from './dto/create-question.dto';
 import { UpdateQuestionDto } from './dto/update-question.dto';
@@ -13,95 +10,97 @@ import { VoteDto } from './dto/vote.dto';
 export class QuestionsController {
   constructor(private readonly questionsService: QuestionsService) {}
 
-  @UseGuards(JwtAuthGuard)
   @Get('questions/search')
   async searchQuestions(
     @Query('courseId') courseId: string,
     @Query('lectureId') lectureId: string,
     @Query('query') query: string,
   ) {
-    return this.questionsService.searchQuestions(query, courseId, lectureId);
+    return unwrapResult(await this.questionsService.searchQuestions(query, courseId, lectureId));
   }
 
-  @UseGuards(JwtAuthGuard)
   @Post('questions/diff')
+  @HttpCode(HttpStatus.CREATED)
   async diffSync(
-    @Body('ids') ids: string[],
-    @Body('courseId') courseId: string,
-    @Body('lectureId') lectureId: string,
-    @CurrentUser() user: any,
+    @Body()
+    body: {
+      entries?: Array<{ id: string; updatedAt: string }>;
+      lastFetched?: string;
+      courseId?: string;
+      lectureId?: string;
+    },
+    @CurrentUser() user: RequestUser,
   ) {
-    return this.questionsService.diffSync(user.userId, ids, courseId, lectureId);
+    return unwrapResult(await this.questionsService.diffSync(user.userId, body));
   }
 
-  @UseGuards(JwtAuthGuard)
   @Get('courses/:id/general_discussion')
   async getGeneralDiscussion(
     @Param('id') courseId: string,
     @Query('lastFetched') lastFetched: string,
-    @CurrentUser() user: any,
+    @CurrentUser() user: RequestUser,
   ) {
-    return this.questionsService.getGeneralDiscussion(courseId, user.userId, lastFetched);
+    return unwrapResult(
+      await this.questionsService.getGeneralDiscussion(courseId, user.userId, lastFetched),
+    );
   }
 
-  @UseGuards(JwtAuthGuard)
   @Get('lectures/:id/discussion')
   async getLectureDiscussion(
     @Param('id') lectureId: string,
     @Query('lastFetched') lastFetched: string,
-    @CurrentUser() user: any,
+    @CurrentUser() user: RequestUser,
   ) {
-    return this.questionsService.getLectureDiscussion(lectureId, user.userId, lastFetched);
+    return unwrapResult(
+      await this.questionsService.getLectureDiscussion(lectureId, user.userId, lastFetched),
+    );
   }
 
-  @UseGuards(JwtAuthGuard)
   @Post('courses/:id/general_discussion')
   @HttpCode(HttpStatus.CREATED)
   async createGeneralQuestion(
     @Param('id') courseId: string,
     @Body() dto: CreateQuestionDto,
-    @CurrentUser() user: any,
+    @CurrentUser() user: RequestUser,
   ) {
-    return this.questionsService.createGeneralDiscussionQuestion(courseId, user.userId, dto);
+    return unwrapResult(
+      await this.questionsService.createGeneralDiscussionQuestion(courseId, user.userId, dto),
+    );
   }
 
-  @UseGuards(JwtAuthGuard)
   @Post('lectures/:id/discussion')
   @HttpCode(HttpStatus.CREATED)
   async createLectureQuestion(
     @Param('id') lectureId: string,
     @Body() dto: CreateQuestionDto,
-    @CurrentUser() user: any,
+    @CurrentUser() user: RequestUser,
   ) {
-    return this.questionsService.createLectureDiscussionQuestion(lectureId, user.userId, dto);
+    return unwrapResult(
+      await this.questionsService.createLectureDiscussionQuestion(lectureId, user.userId, dto),
+    );
   }
 
-  @UseGuards(JwtAuthGuard)
   @Post('questions/:id/vote')
+  @HttpCode(HttpStatus.CREATED)
   async voteQuestion(
     @Param('id') questionId: string,
     @Body() dto: VoteDto,
-    @CurrentUser() user: any,
+    @CurrentUser() user: RequestUser,
   ) {
-    return this.questionsService.voteQuestion(questionId, user.userId, dto);
+    return unwrapResult(await this.questionsService.voteQuestion(questionId, user.userId, dto));
   }
 
-  @UseGuards(JwtAuthGuard)
   @Put('questions/:id')
   async updateQuestion(
     @Param('id') questionId: string,
     @Body() dto: UpdateQuestionDto,
-    @CurrentUser() user: any,
+    @CurrentUser() user: RequestUser,
   ) {
-    return this.questionsService.updateQuestion(questionId, user.userId, dto);
+    return unwrapResult(await this.questionsService.updateQuestion(questionId, user.userId, dto));
   }
 
-  @UseGuards(JwtAuthGuard)
   @Delete('questions/:id')
-  async deleteQuestion(
-    @Param('id') questionId: string,
-    @CurrentUser() user: any,
-  ) {
-    return this.questionsService.deleteQuestion(questionId, user.userId);
+  async deleteQuestion(@Param('id') questionId: string, @CurrentUser() user: RequestUser) {
+    return unwrapResult(await this.questionsService.deleteQuestion(questionId, user.userId));
   }
 }

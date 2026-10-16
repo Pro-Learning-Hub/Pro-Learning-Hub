@@ -1,33 +1,44 @@
 import { Injectable } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, DataSource } from 'typeorm';
-import { Course } from './course.entity';
+import { and, eq } from 'drizzle-orm';
+import { DrizzleService } from '../database/drizzle.service';
+import { courseAdmins, courseEnrollments, courses } from '../database/schema';
 
 @Injectable()
 export class CoursesService {
-  constructor(
-    @InjectRepository(Course)
-    private readonly coursesRepository: Repository<Course>,
-    private readonly dataSource: DataSource,
-  ) {}
+  constructor(private readonly drizzle: DrizzleService) {}
 
-  async findById(id: string): Promise<Course | null> {
-    return this.coursesRepository.findOne({ where: { id } });
+  private get db() {
+    return this.drizzle.db;
+  }
+
+  async findById(id: string) {
+    const [course] = await this.db.select().from(courses).where(eq(courses.id, id)).limit(1);
+    return course ?? null;
   }
 
   async isCourseAdmin(userId: string, courseId: string): Promise<boolean> {
-    const result = await this.dataSource.query(
-      'SELECT 1 FROM courseAdmins WHERE courseId = ? AND userId = ?',
-      [courseId, userId],
-    );
-    return result.length > 0;
+    const rows = await this.db
+      .select({ courseId: courseAdmins.courseId })
+      .from(courseAdmins)
+      .where(and(eq(courseAdmins.courseId, courseId), eq(courseAdmins.userId, userId)))
+      .limit(1);
+    return rows.length > 0;
   }
 
   async isUserEnrolledInCourse(userId: string, courseId: string): Promise<boolean> {
-    const result = await this.dataSource.query(
-      'SELECT 1 FROM courseEnrollments WHERE courseId = ? AND userId = ?',
-      [courseId, userId],
-    );
-    return result.length > 0;
+    const rows = await this.db
+      .select({ courseId: courseEnrollments.courseId })
+      .from(courseEnrollments)
+      .where(and(eq(courseEnrollments.courseId, courseId), eq(courseEnrollments.userId, userId)))
+      .limit(1);
+    return rows.length > 0;
+  }
+
+  async canAccessCourse(userId: string, courseId: string): Promise<boolean> {
+    const [enrolled, admin] = await Promise.all([
+      this.isUserEnrolledInCourse(userId, courseId),
+      this.isCourseAdmin(userId, courseId),
+    ]);
+    return enrolled || admin;
   }
 }
