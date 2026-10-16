@@ -12,6 +12,8 @@ import { logout } from '@/store/slices/authSlice'
 import { clearSync } from '@/store/slices/syncSlice'
 import { toggleTheme } from '@/store/slices/uiSlice'
 import { UserAvatar } from '@/components/shared/UserAvatar'
+import { Communities } from './sidebar-extras/Communities'
+import { Featured } from './sidebar-extras/Featured'
 import { disconnectSocket } from '@/lib/socket'
 import { api } from '@/lib/api'
 import { http } from '@/lib/http'
@@ -98,6 +100,9 @@ export function AppSidebar() {
             </SidebarMenu>
           </SidebarGroupContent>
         </SidebarGroup>
+
+        <Communities />
+        <Featured />
       </SidebarContent>
 
       <SidebarSeparator />
