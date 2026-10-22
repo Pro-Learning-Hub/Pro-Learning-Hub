@@ -156,16 +156,17 @@ export class QuestionsService {
     userId: string,
     dto: CreateQuestionDto,
   ): Promise<ServiceResult<{ newEntry: unknown; lastFetched: string }>> {
-    if (!dto.title || !dto.body) {
+    if (!dto.title) {
       return fail('validation_error', 'Missing required fields');
     }
+    const body = dto.body ?? '';
     const user = await this.usersService.getUserPublicData(userId);
     const newEntryId = uuidv4();
     const createTime = getCurrentTimeInDBFormat();
     await this.db.insert(questions).values({
       id: newEntryId,
       title: dto.title,
-      body: dto.body,
+      body,
       userId,
       courseId,
     });
@@ -173,7 +174,7 @@ export class QuestionsService {
     const newEntry = {
       id: newEntryId,
       title: dto.title,
-      body: dto.body,
+      body,
       user,
       updatedAt: createTime,
       upvotes: 0,
@@ -194,15 +195,16 @@ export class QuestionsService {
     userId: string,
     dto: CreateQuestionDto,
   ): Promise<ServiceResult<{ newEntry: unknown; lastFetched: string }>> {
-    if (!userId || !dto.title || !dto.body) {
+    if (!userId || !dto.title) {
       return fail('validation_error', 'Missing required fields');
     }
+    const body = dto.body ?? '';
     const newEntryId = uuidv4();
     const createTime = getCurrentTimeInDBFormat();
     await this.db.insert(questions).values({
       id: newEntryId,
       title: dto.title,
-      body: dto.body,
+      body,
       userId,
       lectureId,
     });
@@ -210,7 +212,7 @@ export class QuestionsService {
     const newEntry = {
       id: newEntryId,
       title: dto.title,
-      body: dto.body,
+      body,
       user: await this.usersService.getUserPublicData(userId),
       updatedAt: createTime,
       upvotes: 0,
