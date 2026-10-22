@@ -5,6 +5,7 @@ import { DrizzleService } from '../database/drizzle.service';
 import { lectures, questions, replies, votes } from '../database/schema';
 import { UsersService } from '../users/users.service';
 import { CoursesService } from '../courses/courses.service';
+import { VotesService } from '../votes/votes.service';
 import { EventsGateway } from '../gateway/events.gateway';
 import { fail, ok, ServiceResult } from '../common/types/service-result';
 import { formatDbTimestamp, getCurrentTimeInDBFormat, parseDbTime, withFormattedTimestamps } from '../common/time';
@@ -17,6 +18,7 @@ export class RepliesService {
     private readonly drizzle: DrizzleService,
     private readonly usersService: UsersService,
     private readonly coursesService: CoursesService,
+    private readonly votesService: VotesService,
     private readonly events: EventsGateway,
   ) {}
 
@@ -25,12 +27,7 @@ export class RepliesService {
   }
 
   async getUpvoteStatus(userId: string, replyId: string): Promise<boolean> {
-    const rows = await this.db
-      .select({ userId: votes.userId })
-      .from(votes)
-      .where(and(eq(votes.userId, userId), eq(votes.replyId, replyId)))
-      .limit(1);
-    return rows.length > 0;
+    return this.votesService.hasVoted(userId, { replyId });
   }
 
   private async getReplyCourseId(replyId: string): Promise<string | null> {
@@ -175,11 +172,10 @@ export class RepliesService {
       return fail('not_found', 'Reply not found');
     }
 
-    await this.db.transaction(async (tx) => {
-      if (action === 'upvote') {
-        await tx.insert(votes).values({ userId, replyId });
-      } else if (action === 'downvote') {
-        await tx.delete(votes).where(and(eq(votes.userId, userId), eq(votes.replyId, replyId)));
+    const applied = await this.db.transaction(async (tx) => {
+      const changed = await this.votesService.apply(tx, userId, action, { replyId });
+      if (!changed) {
+        return false;
       }
       await tx
         .update(replies)
@@ -187,7 +183,11 @@ export class RepliesService {
           upvotes: sql`${replies.upvotes} + ${action === 'upvote' ? 1 : -1}`,
         })
         .where(eq(replies.id, replyId));
+      return true;
     });
+    if (!applied) {
+      return fail('conflict', action === 'upvote' ? 'Already upvoted' : 'Vote not found');
+    }
 
     this.events.emitToRoom(
       `question-${reply.questionId}`,

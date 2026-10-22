@@ -5,6 +5,7 @@ import { DrizzleService } from '../database/drizzle.service';
 import { lectures, questions, votes } from '../database/schema';
 import { CoursesService } from '../courses/courses.service';
 import { UsersService } from '../users/users.service';
+import { VotesService } from '../votes/votes.service';
 import { EventsGateway } from '../gateway/events.gateway';
 import { fail, ok, ServiceResult } from '../common/types/service-result';
 import { formatDbTimestamp, getCurrentTimeInDBFormat, parseDbTime } from '../common/time';
@@ -18,6 +19,7 @@ export class QuestionsService {
     private readonly drizzle: DrizzleService,
     private readonly coursesService: CoursesService,
     private readonly usersService: UsersService,
+    private readonly votesService: VotesService,
     private readonly events: EventsGateway,
   ) {}
 
@@ -26,19 +28,9 @@ export class QuestionsService {
   }
 
   async getUpvoteStatus(userId: string, resourceId: string, resourceType: 'question' | 'reply') {
-    const rows =
-      resourceType === 'question'
-        ? await this.db
-            .select({ userId: votes.userId })
-            .from(votes)
-            .where(and(eq(votes.userId, userId), eq(votes.questionId, resourceId)))
-            .limit(1)
-        : await this.db
-            .select({ userId: votes.userId })
-            .from(votes)
-            .where(and(eq(votes.userId, userId), eq(votes.replyId, resourceId)))
-            .limit(1);
-    return rows.length > 0;
+    return resourceType === 'question'
+      ? this.votesService.hasVoted(userId, { questionId: resourceId })
+      : this.votesService.hasVoted(userId, { replyId: resourceId });
   }
 
   private async getQuestionCourseId(questionId: string): Promise<string | null> {
@@ -248,19 +240,25 @@ export class QuestionsService {
       return fail('not_found', 'Question not found');
     }
 
-    await this.db.transaction(async (tx) => {
+    const applied = await this.db.transaction(async (tx) => {
+      const changed = await this.votesService.apply(tx, userId, dto.action, { questionId });
+      if (!changed) {
+        return false;
+      }
       await tx
         .update(questions)
         .set({
           upvotes: sql`${questions.upvotes} + ${dto.action === 'upvote' ? 1 : -1}`,
         })
         .where(eq(questions.id, questionId));
-      if (dto.action === 'upvote') {
-        await tx.insert(votes).values({ userId, questionId });
-      } else {
-        await tx.delete(votes).where(and(eq(votes.userId, userId), eq(votes.questionId, questionId)));
-      }
+      return true;
     });
+    if (!applied) {
+      return fail(
+        'conflict',
+        dto.action === 'upvote' ? 'Already upvoted' : 'Vote not found',
+      );
+    }
 
     const socketRoom = question.courseId
       ? `generalDiscussion-${question.courseId}`

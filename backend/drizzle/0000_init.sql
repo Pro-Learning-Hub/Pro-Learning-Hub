@@ -120,6 +120,11 @@ CREATE TABLE IF NOT EXISTS votes (
   )
 );
 
+CREATE UNIQUE INDEX IF NOT EXISTS votes_user_question_unique
+  ON votes ("userId", "questionId") WHERE "questionId" IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS votes_user_reply_unique
+  ON votes ("userId", "replyId") WHERE "replyId" IS NOT NULL;
+
 CREATE TABLE IF NOT EXISTS announcements (
   id varchar(36) PRIMARY KEY,
   "createdAt" timestamptz NOT NULL DEFAULT now(),
