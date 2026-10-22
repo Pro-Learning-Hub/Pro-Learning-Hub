@@ -46,6 +46,19 @@ export class LecturesService {
       .orderBy(lectureResources.createdAt);
   }
 
+  private async findSectionByTitle(
+    courseId: string,
+    title: string,
+    executor: { select: typeof this.db.select } = this.db,
+  ) {
+    const [section] = await executor
+      .select({ id: sections.id })
+      .from(sections)
+      .where(and(eq(sections.courseId, courseId), eq(sections.title, title)))
+      .limit(1);
+    return section ?? null;
+  }
+
   private async insertResources(
     lectureId: string,
     items: LectureResourceInputDto[] | undefined,
@@ -144,7 +157,7 @@ export class LecturesService {
         tags: lectures.tags,
       })
       .from(lectures)
-      .where(eq(lectures.id, lectureId))
+      .where(and(eq(lectures.id, lectureId), eq(lectures.courseId, courseId)))
       .limit(1);
     if (!lecture) {
       return fail('not_found', 'Lecture not found');
@@ -201,11 +214,7 @@ export class LecturesService {
     const shorts = dto.extras ?? [];
 
     const created = await this.db.transaction(async (tx) => {
-      const [existingSection] = await tx
-        .select({ id: sections.id })
-        .from(sections)
-        .where(eq(sections.title, sectionTitle))
-        .limit(1);
+      const existingSection = await this.findSectionByTitle(courseId, sectionTitle, tx);
 
       let sectionId = existingSection?.id;
       let newSection = false;
@@ -327,11 +336,7 @@ export class LecturesService {
     const updated = await this.db.transaction(async (tx) => {
       let sectionId = lecture.sectionId;
       if (sectionTitle) {
-        const [existingSection] = await tx
-          .select({ id: sections.id })
-          .from(sections)
-          .where(eq(sections.title, sectionTitle))
-          .limit(1);
+        const existingSection = await this.findSectionByTitle(lecture.courseId, sectionTitle, tx);
         if (existingSection) {
           sectionId = existingSection.id;
         } else {
