@@ -11,12 +11,14 @@
 | `LecturesModule` | courses/lectures, search, media | `sections`, `lectures`, `lectureResources` | Admin writes; FTS; YT proxy |
 | `AnnouncementsModule` | announcements + diff | `announcements` | Admin writes; body field `details` |
 | `CommentsModule` | comments | `comments` | Count via DB trigger |
-| `QuestionsModule` | general + lecture discussion, votes, search, diff | `questions`, `votes` | FTS |
-| `RepliesModule` | replies, votes, diff | `replies`, `votes` | Count via DB trigger |
+| `QuestionsModule` | general + lecture discussion, votes, search, diff | `questions` | FTS; votes via `VotesModule` |
+| `RepliesModule` | replies, votes, diff | `replies` | Count via DB trigger; votes via `VotesModule` |
+| `VotesModule` | none | `votes` | Idempotent upvote/downvote; partial unique indexes |
 | `EventsModule` | Socket.IO | none | Gateway only; feature services emit |
 
 `AppModule` only imports these. Leaf modules do not import each other in a cycle:
 questions/replies/announcements/comments import `UsersModule` + `CoursesModule` + `EventsModule`.
+Questions and replies also import `VotesModule`.
 
 ## Client features
 

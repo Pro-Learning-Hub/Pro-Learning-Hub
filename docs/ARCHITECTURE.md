@@ -54,8 +54,8 @@ One HTTP surface = one folder: `*.module.ts` (wiring), `*.controller.ts` (HTTP),
 4. **Drizzle only through `DrizzleService`.** Feature services inject it. Schema and
    relations live under `database/`.
 5. **Global prefix once.** Controllers do not repeat `api/v1`.
-6. **Deletes** return `{ success: true }` (plus ids the old client already used for
-   socket/cache invalidation).
+6. **Deletes** return `{ message }` for lectures, questions, and replies.
+   Announcements return `{ success: true, message }`.
 7. **Timestamps.** `lastFetched` / `lastSynced` stay `YYYY-MM-DD HH:mm:ss.sss` UTC
    so the client incremental sync is unchanged.
 
@@ -146,9 +146,8 @@ Rooms: `announcements-${courseId}`, `comments-${announcementId}`, `sections-${co
 
 ```
 frontend/src/
-  lib/{http.ts, api.ts, socket.ts, utils.ts}   # http() + Zod; RTK still wraps http
-  schemas/*.ts                                 # draft + full Zod, z.infer types
-  store/                                       # auth (user only), ui, RTK api
+  lib/{http.ts, api.ts, socket.ts, utils.ts, schemas.ts}  # http() + Zod; RTK wraps http
+  store/                                       # auth (user only), ui, sync, RTK api
   features/<name>/{pages,components,*ApiSlice}
   components/ui                                # shadcn only
 ```

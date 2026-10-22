@@ -4,7 +4,7 @@ export interface User {
   email: string
   picture?: string
   pictureThumbnail?: string
-  role: 'student' | 'instructor' | 'admin'
+  role: 'student' | 'tutor' | 'admin'
 }
 
 export interface ResourceLink {

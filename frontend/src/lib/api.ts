@@ -34,6 +34,5 @@ export const api = createApi({
   },
   refetchOnMountOrArgChange: true,
   keepUnusedDataFor: 60 * 60 * 24,
-  tagTypes: ['Sections', 'Lecture', 'Announcements', 'Discussion', 'Replies'],
   endpoints: () => ({}),
 })
