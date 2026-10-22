@@ -25,7 +25,6 @@ import { UpdateLectureDto } from './dto/update-lecture.dto';
 export class LecturesController {
   constructor(private readonly lecturesService: LecturesService) {}
 
-  @Public()
   @Get('lectures/media')
   async proxyMedia(
     @Query('url') url: string,
@@ -41,7 +40,7 @@ export class LecturesController {
     }
     const isAudioOnly = type === 'audio';
     const controller = new AbortController();
-    const timeout = 1000 * 60 * 10;
+    const timeout = setTimeout(() => controller.abort(), 1000 * 60 * 10);
     req.on('aborted', () => controller.abort());
     try {
       const downloadResponse = await fetch(
@@ -62,10 +61,11 @@ export class LecturesController {
       Readable.fromWeb(downloadResponse.body as never).pipe(res);
     } catch {
       res.status(500).send('Something went wrong');
+    } finally {
+      clearTimeout(timeout);
     }
   }
 
-  @Public()
   @Get('lectures/transcript')
   async proxyTranscript(
     @Query('url') url: string,

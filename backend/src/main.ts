@@ -19,8 +19,12 @@ async function bootstrap() {
     }),
   );
   app.useGlobalFilters(new DrizzleExceptionFilter(), new HttpExceptionFilter());
+  const frontendOrigins = (process.env.FRONTEND_ORIGIN ?? '')
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean);
   app.enableCors({
-    origin: true,
+    origin: frontendOrigins.length > 0 ? frontendOrigins : true,
     credentials: true,
   });
 
