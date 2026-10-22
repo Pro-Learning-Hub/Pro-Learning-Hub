@@ -228,7 +228,7 @@ export class AuthService {
     if (!passwordMatch) {
       return fail('unauthorized', 'Wrong password');
     }
-    if (courseId && !(await this.isAdminOfCourse(user.id, courseId))) {
+    if (!courseId || !(await this.isAdminOfCourse(user.id, courseId))) {
       return fail('forbidden', 'User is not a course admin');
     }
     const accessToken = this.signToken(user.id, courseId, 'admin');
@@ -246,10 +246,10 @@ export class AuthService {
     }
     const data = verified.data;
     const [user] = await this.db.select().from(users).where(eq(users.email, data.email)).limit(1);
-    if (!user) {
+    if (!user || user.role !== 'admin') {
       return fail('unauthorized', 'User not found');
     }
-    if (dto.courseId && !(await this.isAdminOfCourse(user.id, dto.courseId))) {
+    if (!dto.courseId || !(await this.isAdminOfCourse(user.id, dto.courseId))) {
       return fail('forbidden', 'User is not a course admin');
     }
     const accessToken = this.signToken(user.id, dto.courseId, 'admin');
