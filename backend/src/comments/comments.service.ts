@@ -38,12 +38,14 @@ export class CommentsService {
       .from(comments)
       .where(eq(comments.announcementId, announcementId))
       .orderBy(comments.createdAt);
-    const results = [];
-    for (const comment of rows.reverse()) {
-      const user = await this.usersService.getUserPublicData(comment.userId);
+    const ordered = rows.reverse();
+    const usersById = await this.usersService.getPublicUsersByIds(
+      ordered.map((comment) => comment.userId),
+    );
+    const results = ordered.map((comment) => {
       const { userId: _userId, ...rest } = withFormattedTimestamps(comment);
-      results.push({ ...rest, user });
-    }
+      return { ...rest, user: usersById.get(comment.userId) ?? null };
+    });
     return ok(results);
   }
 

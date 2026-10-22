@@ -33,6 +33,26 @@ export class QuestionsService {
       : this.votesService.hasVoted(userId, { replyId: resourceId });
   }
 
+  private async withAuthorsAndVotes<T extends { id: string; userId: string; updatedAt: Date }>(
+    entries: T[],
+    userId: string,
+  ) {
+    const [usersById, voted] = await Promise.all([
+      this.usersService.getPublicUsersByIds(entries.map((entry) => entry.userId)),
+      this.votesService.votedIds(
+        userId,
+        'question',
+        entries.map((entry) => entry.id),
+      ),
+    ]);
+    return entries.map((entry) => ({
+      ...entry,
+      updatedAt: formatDbTimestamp(entry.updatedAt),
+      user: usersById.get(entry.userId) ?? null,
+      upvoted: voted.has(entry.id),
+    }));
+  }
+
   private async getQuestionCourseId(questionId: string): Promise<string | null> {
     const [row] = await this.db
       .select({
@@ -90,17 +110,7 @@ export class QuestionsService {
       .where(and(...filters))
       .orderBy(desc(questions.upvotes));
 
-    const results = [];
-    for (const entry of entries) {
-      const user = await this.usersService.getUserPublicData(entry.userId);
-      const upvoted = await this.getUpvoteStatus(userId, entry.id, 'question');
-      results.push({
-        ...entry,
-        updatedAt: formatDbTimestamp(entry.updatedAt),
-        user,
-        upvoted,
-      });
-    }
+    const results = await this.withAuthorsAndVotes(entries, userId);
     return ok({ questions: results, lastFetched: getCurrentTimeInDBFormat() });
   }
 
@@ -137,17 +147,7 @@ export class QuestionsService {
       .where(and(...filters))
       .orderBy(desc(questions.upvotes));
 
-    const results = [];
-    for (const entry of entries) {
-      const user = await this.usersService.getUserPublicData(entry.userId);
-      const upvoted = await this.getUpvoteStatus(userId, entry.id, 'question');
-      results.push({
-        ...entry,
-        updatedAt: formatDbTimestamp(entry.updatedAt),
-        user,
-        upvoted,
-      });
-    }
+    const results = await this.withAuthorsAndVotes(entries, userId);
     return ok({ results, lastFetched: getCurrentTimeInDBFormat() });
   }
 

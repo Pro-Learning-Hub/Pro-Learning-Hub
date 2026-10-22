@@ -95,18 +95,14 @@ export class RepliesService {
     const isNew = lastFetched
       ? question.updatedAt >= parseDbTime(lastFetched)
       : true;
-    const questionUpvoted = await this.db
-      .select({ userId: votes.userId })
-      .from(votes)
-      .where(and(eq(votes.userId, userId), eq(votes.questionId, questionId)))
-      .limit(1);
+    const questionUpvoted = await this.votesService.hasVoted(userId, { questionId });
 
     let questionResponse: Record<string, unknown>;
     if (!isNew) {
       questionResponse = {
         id: question.id,
         repliesCount: question.repliesCount,
-        upvoted: questionUpvoted.length > 0,
+        upvoted: questionUpvoted,
         upvotes: question.upvotes,
         updatedAt: formatDbTimestamp(question.updatedAt),
       };
@@ -115,7 +111,7 @@ export class RepliesService {
       questionResponse = {
         ...rest,
         updatedAt: formatDbTimestamp(question.updatedAt),
-        upvoted: questionUpvoted.length > 0,
+        upvoted: questionUpvoted,
         user: await this.usersService.getUserPublicData(question.userId),
       };
     }
@@ -136,17 +132,20 @@ export class RepliesService {
       .where(and(...filters))
       .orderBy(desc(replies.upvotes));
 
-    const repliesList = [];
-    for (const reply of replyRows) {
-      const user = await this.usersService.getUserPublicData(reply.userId);
-      const upvoted = await this.getUpvoteStatus(userId, reply.id);
-      repliesList.push({
-        ...reply,
-        updatedAt: formatDbTimestamp(reply.updatedAt),
-        user,
-        upvoted,
-      });
-    }
+    const [usersById, voted] = await Promise.all([
+      this.usersService.getPublicUsersByIds(replyRows.map((reply) => reply.userId)),
+      this.votesService.votedIds(
+        userId,
+        'reply',
+        replyRows.map((reply) => reply.id),
+      ),
+    ]);
+    const repliesList = replyRows.map((reply) => ({
+      ...reply,
+      updatedAt: formatDbTimestamp(reply.updatedAt),
+      user: usersById.get(reply.userId) ?? null,
+      upvoted: voted.has(reply.id),
+    }));
 
     return ok({
       question: questionResponse,

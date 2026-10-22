@@ -49,12 +49,14 @@ export class AnnouncementsService {
       .from(announcements)
       .where(and(...filters))
       .orderBy(announcements.createdAt);
-    const results = [];
-    for (const announcement of rows.reverse()) {
-      const user = await this.usersService.getUserPublicData(announcement.userId);
+    const ordered = rows.reverse();
+    const usersById = await this.usersService.getPublicUsersByIds(
+      ordered.map((announcement) => announcement.userId),
+    );
+    const results = ordered.map((announcement) => {
       const { userId: _userId, ...rest } = withFormattedTimestamps(announcement);
-      results.push({ ...rest, user });
-    }
+      return { ...rest, user: usersById.get(announcement.userId) ?? null };
+    });
     return ok({ announcements: results, lastFetched: getCurrentTimeInDBFormat() });
   }
 
@@ -82,13 +84,14 @@ export class AnnouncementsService {
     const user = await this.usersService.getUserPublicData(userId);
     const { userId: _userId, ...rest } = withFormattedTimestamps(created);
     const lastFetched = getCurrentTimeInDBFormat();
+    const payload = { ...rest, user };
     this.events.emitToRoom(
       `announcements-${courseId}`,
       'announcementCreated',
-      { payload: rest, userId, lastFetched },
+      { payload, userId, lastFetched },
       userId,
     );
-    return ok({ ...rest, lastFetched, user });
+    return ok({ ...payload, lastFetched });
   }
 
   async updateAnnouncement(
