@@ -8,3 +8,8 @@ node_modules/
 *.sqlite3
 test_server/.env
 front-end/.env
+frontend/dist/
+backend/dist/
+*.tsbuildinfo
+frontend/.env
+backend/.env

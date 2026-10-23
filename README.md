@@ -51,9 +51,9 @@ Everything you need for a complete learning experience.
 
 ## 💻 Tech Stack
 
-- **Frontend**: React, Redux, Socket.IO Client
-- **Backend**: Node.js, Express, Socket.IO, Prisma
-- **Database**: MySQL
+- **Frontend**: React 19, Vite, Tailwind v4, shadcn/ui, RTK Query, Socket.IO Client
+- **Backend**: NestJS 10, Drizzle ORM, Socket.IO, cookie JWT
+- **Database**: Postgres
 - **Deployment**: Vercel (Frontend), Docker
 
 ---
@@ -65,8 +65,8 @@ Follow these steps to clone and run the project locally.
 ### Prerequisites
 
 - Node.js and npm
-- MySQL 5.8+
-- Docker and Docker Compose
+- Postgres 16+
+- Docker and Docker Compose (optional)
 
 ### Installation
 
@@ -77,15 +77,21 @@ Follow these steps to clone and run the project locally.
     ```
 
 2.  **Set up environment variables**:
-    - Create a `.env` file in the `front-end` directory and add `VITE_BACKEND_DOMAIN=http://localhost:3001`.
-    - Create a `.env` file in the `Back-End` directory with your database credentials and other required variables.
+    - Copy `frontend/.env.example` to `frontend/.env`
+    - Copy `backend/.env.example` to `backend/.env`
 
-3.  **Run the application using Docker**:
+3.  **Apply the Postgres schema** from `backend/drizzle/0000_init.sql` (and `0001_votes_unique.sql` if the database already exists).
+
+4.  **Run the apps**:
     ```bash
-    docker-compose up --build
+    cd backend && npm install && npm run start:dev
     ```
 
-The frontend will be available at `http://localhost:3000` and the backend at `http://localhost:3001`.
+    ```bash
+    cd frontend && npm install && npm run dev
+    ```
+
+The frontend is at `http://localhost:5173` and the backend at `http://localhost:3000` (`/api/v1`). Vite proxies `/api` and `/socket.io` to the backend.
 
 ---
 
